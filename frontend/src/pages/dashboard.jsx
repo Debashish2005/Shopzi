@@ -294,7 +294,7 @@ useEffect(() => {
     <>
       <Header onSearch={handleSearch} />
 
-{user && user.id === 4 && user.full_name === "debashish mallick" && (
+{user && user.id === 1 && user.full_name === "debashish mallick" && (
 
   <div className="flex justify-end px-4 mt-2">
     <button
