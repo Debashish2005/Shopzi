@@ -2,9 +2,14 @@ import { useEffect, useState } from "react";
 import {
   ArrowRight,
   CalendarDays,
+  CircleAlert,
+  LoaderCircle,
   MapPin,
+  MessageSquareText,
   Package,
   RefreshCw,
+  Send,
+  X,
   XCircle,
 } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -83,6 +88,8 @@ function OrderStatus({ status }) {
     Shipped: "border-amber-200 bg-amber-50 text-amber-800",
     Delivered: "border-emerald-200 bg-emerald-50 text-emerald-700",
     Cancelled: "border-red-200 bg-red-50 text-red-700",
+    "Cancellation Requested":
+      "border-orange-200 bg-orange-50 text-orange-800",
   };
 
   return (
@@ -96,10 +103,112 @@ function OrderStatus({ status }) {
   );
 }
 
+function CancellationRequestModal({
+  order,
+  onClose,
+  onSubmit,
+  submitting,
+}) {
+  const [reason, setReason] = useState("");
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    onSubmit(reason.trim());
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-5">
+      <div
+        className="w-full bg-white shadow-xl sm:max-w-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cancellation-title"
+      >
+        <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
+          <div>
+            <h2
+              id="cancellation-title"
+              className="text-lg font-bold text-gray-950"
+            >
+              Request cancellation
+            </h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Order #{order.id} will remain active until an admin approves the
+              request and starts the refund.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="grid h-9 w-9 shrink-0 place-items-center text-gray-500 hover:bg-gray-100 disabled:opacity-50"
+            aria-label="Close cancellation request"
+            title="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4 p-5">
+          <div>
+            <label
+              htmlFor="cancellation-reason"
+              className="text-sm font-semibold text-gray-800"
+            >
+              Why would you like to cancel?
+            </label>
+            <textarea
+              id="cancellation-reason"
+              required
+              minLength={10}
+              maxLength={500}
+              rows={5}
+              autoFocus
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="For example, I ordered the wrong model."
+              className="mt-2 w-full resize-none border border-gray-300 px-3 py-2.5 text-sm outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
+            />
+            <div className="mt-1 flex justify-between text-xs text-gray-500">
+              <span>At least 10 characters</span>
+              <span>{reason.length}/500</span>
+            </div>
+          </div>
+
+          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={submitting}
+              className="h-10 border border-gray-300 px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Keep order
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || reason.trim().length < 10}
+              className="flex h-10 items-center justify-center gap-2 bg-red-600 px-5 text-sm font-semibold text-white hover:bg-red-700 disabled:bg-gray-400"
+            >
+              {submitting ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+              Send request
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function OrdersPage() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [cancellationOrder, setCancellationOrder] = useState(null);
+  const [requestingCancellation, setRequestingCancellation] = useState(false);
 
   const fetchOrders = async () => {
     setLoading(true);
@@ -172,6 +281,42 @@ export default function OrdersPage() {
     });
   };
 
+  const requestCancellation = async (reason) => {
+    if (!cancellationOrder) return;
+
+    setRequestingCancellation(true);
+    try {
+      const response = await api.post(
+        `/orders/${cancellationOrder.id}/cancellation-request`,
+        { reason }
+      );
+      setOrders((currentOrders) =>
+        currentOrders.map((order) =>
+          order.id === cancellationOrder.id
+            ? {
+                ...order,
+                cancellation_request_status: "Pending",
+                cancellation_request_reason: reason,
+                cancellation_request_admin_note: null,
+              }
+            : order
+        )
+      );
+      setCancellationOrder(null);
+      toast.success(
+        response.data.message || "Cancellation request sent for review"
+      );
+    } catch (error) {
+      console.error("Cancellation request failed", error);
+      toast.error(
+        error.response?.data?.message ||
+          "Could not submit cancellation request"
+      );
+    } finally {
+      setRequestingCancellation(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-100">
       <Toaster
@@ -218,12 +363,23 @@ export default function OrdersPage() {
         ) : (
           <section className="space-y-5" aria-label="Order history">
             {orders.map((order) => {
-              const canCancel =
+              const canCancelDirectly =
                 order.status === "Placed" &&
                 !(
                   order.payment_method === "Razorpay" &&
                   order.payment_status === "Paid"
                 );
+              const canRequestCancellation =
+                order.payment_method === "Razorpay" &&
+                order.payment_status === "Paid" &&
+                ["Placed", "Packed"].includes(order.status) &&
+                !["Pending", "Approved"].includes(
+                  order.cancellation_request_status
+                );
+              const displayedStatus =
+                order.cancellation_request_status === "Pending"
+                  ? "Cancellation Requested"
+                  : order.status;
 
               return (
                 <article
@@ -243,20 +399,61 @@ export default function OrdersPage() {
                             : "Date unavailable"}
                         </p>
                       </div>
-                      <OrderStatus status={order.status} />
+                      <OrderStatus status={displayedStatus} />
                     </div>
 
-                    {canCancel && (
-                      <button
-                        type="button"
-                        onClick={() => cancelOrder(order.id)}
-                        className="flex h-9 w-fit items-center gap-1.5 text-sm font-semibold text-red-600 hover:underline"
-                      >
-                        <XCircle className="h-4 w-4" />
-                        Cancel order
-                      </button>
-                    )}
+                    <div className="flex flex-wrap items-center gap-3">
+                      {canCancelDirectly && (
+                        <button
+                          type="button"
+                          onClick={() => cancelOrder(order.id)}
+                          className="flex h-9 w-fit items-center gap-1.5 text-sm font-semibold text-red-600 hover:underline"
+                        >
+                          <XCircle className="h-4 w-4" />
+                          Cancel order
+                        </button>
+                      )}
+                      {canRequestCancellation && (
+                        <button
+                          type="button"
+                          onClick={() => setCancellationOrder(order)}
+                          className="flex h-9 items-center gap-2 border border-red-200 px-3 text-sm font-semibold text-red-700 hover:bg-red-50"
+                        >
+                          <MessageSquareText className="h-4 w-4" />
+                          {order.cancellation_request_status === "Rejected"
+                            ? "Request again"
+                            : "Request cancellation"}
+                        </button>
+                      )}
+                    </div>
                   </header>
+
+                  {order.cancellation_request_status === "Pending" && (
+                    <div className="flex gap-3 border-b border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-950">
+                      <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-orange-700" />
+                      <div>
+                        <p className="font-semibold">Awaiting admin review</p>
+                        <p className="mt-1 leading-5 text-orange-900">
+                          {order.cancellation_request_reason}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {order.cancellation_request_status === "Rejected" && (
+                    <div className="flex gap-3 border-b border-red-200 bg-red-50 px-4 py-3 text-sm text-red-950">
+                      <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-700" />
+                      <div>
+                        <p className="font-semibold">
+                          Cancellation request declined
+                        </p>
+                        <p className="mt-1 leading-5 text-red-900">
+                          {order.cancellation_request_admin_note ||
+                            "The order will continue through fulfilment."}
+                        </p>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="grid gap-4 border-b border-gray-200 px-4 py-3 text-sm sm:grid-cols-2">
                     <div>
@@ -333,6 +530,17 @@ export default function OrdersPage() {
           </section>
         )}
       </main>
+
+      {cancellationOrder && (
+        <CancellationRequestModal
+          order={cancellationOrder}
+          onClose={() => {
+            if (!requestingCancellation) setCancellationOrder(null);
+          }}
+          onSubmit={requestCancellation}
+          submitting={requestingCancellation}
+        />
+      )}
     </div>
   );
 }

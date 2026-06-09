@@ -822,11 +822,18 @@ app.get("/admin/orders", auth, requireAdmin, async (req, res) => {
          r.razorpay_refund_id,
          r.status AS refund_status,
          r.failure_reason AS refund_failure_reason,
+         cr.id AS cancellation_request_id,
+         cr.status AS cancellation_request_status,
+         cr.reason AS cancellation_request_reason,
+         cr.admin_note AS cancellation_request_admin_note,
+         cr.requested_at AS cancellation_requested_at,
+         cr.reviewed_at AS cancellation_reviewed_at,
          COALESCE(items.item_count, 0) AS item_count
        FROM orders o
        JOIN users u ON u.id = o.user_id
        JOIN addresses a ON a.id = o.address_id
        LEFT JOIN refunds r ON r.order_id = o.id
+       LEFT JOIN order_cancellation_requests cr ON cr.order_id = o.id
        LEFT JOIN (
          SELECT order_id, SUM(quantity) AS item_count
          FROM order_items
@@ -863,9 +870,15 @@ app.patch("/admin/orders/:id/status", auth, requireAdmin, async (req, res) => {
   try {
     await connection.beginTransaction();
     const [[order]] = await connection.query(
-      `SELECT id, payment_method, payment_status, status
-       FROM orders
-       WHERE id = ?
+      `SELECT
+         o.id,
+         o.payment_method,
+         o.payment_status,
+         o.status,
+         cr.status AS cancellation_request_status
+       FROM orders o
+       LEFT JOIN order_cancellation_requests cr ON cr.order_id = o.id
+       WHERE o.id = ?
        FOR UPDATE`,
       [orderId]
     );
@@ -878,6 +891,17 @@ app.patch("/admin/orders/:id/status", auth, requireAdmin, async (req, res) => {
 
     if (order.status === "Cancelled" && nextStatus !== "Cancelled") {
       const error = new Error("A cancelled order cannot be reopened.");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (
+      order.cancellation_request_status === "Pending" &&
+      nextStatus !== order.status
+    ) {
+      const error = new Error(
+        "Review the pending cancellation request before changing this order."
+      );
       error.statusCode = 409;
       throw error;
     }
@@ -939,8 +963,11 @@ app.patch("/admin/orders/:id/status", auth, requireAdmin, async (req, res) => {
   }
 });
 
-app.post("/admin/orders/:id/refund", auth, requireAdmin, async (req, res) => {
+async function processAdminRefund(req, res) {
   const orderId = Number(req.params.id);
+  const approvesCancellationRequest = Boolean(
+    req.approveCancellationRequest
+  );
 
   if (!Number.isInteger(orderId) || orderId <= 0) {
     return res.status(400).json({ message: "Invalid order ID." });
@@ -962,10 +989,12 @@ app.post("/admin/orders/:id/refund", auth, requireAdmin, async (req, res) => {
          p.currency,
          p.status AS payment_record_status,
          r.id AS refund_id,
-         r.status AS refund_status
+         r.status AS refund_status,
+         cr.status AS cancellation_request_status
        FROM orders o
        JOIN payments p ON p.order_id = o.id
        LEFT JOIN refunds r ON r.order_id = o.id
+       LEFT JOIN order_cancellation_requests cr ON cr.order_id = o.id
        WHERE o.id = ?
        FOR UPDATE`,
       [orderId]
@@ -974,6 +1003,28 @@ app.post("/admin/orders/:id/refund", auth, requireAdmin, async (req, res) => {
     if (!record) {
       const error = new Error("Paid Razorpay order not found.");
       error.statusCode = 404;
+      throw error;
+    }
+
+    if (
+      approvesCancellationRequest &&
+      record.cancellation_request_status !== "Pending"
+    ) {
+      const error = new Error(
+        "This order does not have a pending cancellation request."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (
+      !approvesCancellationRequest &&
+      record.cancellation_request_status === "Pending"
+    ) {
+      const error = new Error(
+        "Approve the customer's cancellation request to issue this refund."
+      );
+      error.statusCode = 409;
       throw error;
     }
 
@@ -1119,6 +1170,21 @@ app.post("/admin/orders/:id/refund", auth, requireAdmin, async (req, res) => {
          WHERE id = ?`,
         [isProcessed ? "Refunded" : "RefundPending", orderId]
       );
+      if (approvesCancellationRequest) {
+        await connection.query(
+          `UPDATE order_cancellation_requests
+           SET status = 'Approved',
+               reviewed_by = ?,
+               admin_note = ?,
+               reviewed_at = CURRENT_TIMESTAMP
+           WHERE order_id = ? AND status = 'Pending'`,
+          [
+            req.user.id,
+            String(req.body?.admin_note || "").trim().slice(0, 500) || null,
+            orderId,
+          ]
+        );
+      }
       await connection.commit();
 
       res.json({
@@ -1151,7 +1217,85 @@ app.post("/admin/orders/:id/refund", auth, requireAdmin, async (req, res) => {
     console.error("Admin Razorpay refund error:", error);
     res.status(error.statusCode || 502).json({ message: String(reason) });
   }
-});
+}
+
+app.post(
+  "/admin/orders/:id/refund",
+  auth,
+  requireAdmin,
+  processAdminRefund
+);
+
+app.post(
+  "/admin/orders/:id/cancellation-request/approve",
+  auth,
+  requireAdmin,
+  (req, res) => {
+    req.approveCancellationRequest = true;
+    return processAdminRefund(req, res);
+  }
+);
+
+app.post(
+  "/admin/orders/:id/cancellation-request/reject",
+  auth,
+  requireAdmin,
+  async (req, res) => {
+    const orderId = Number(req.params.id);
+    const adminNote = String(req.body?.admin_note || "").trim();
+
+    if (!Number.isInteger(orderId) || orderId <= 0) {
+      return res.status(400).json({ message: "Invalid order ID." });
+    }
+
+    if (adminNote.length < 3 || adminNote.length > 500) {
+      return res.status(400).json({
+        message: "Add a short rejection reason between 3 and 500 characters.",
+      });
+    }
+
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [[request]] = await connection.query(
+        `SELECT cr.id
+         FROM order_cancellation_requests cr
+         JOIN orders o ON o.id = cr.order_id
+         WHERE cr.order_id = ? AND cr.status = 'Pending'
+         FOR UPDATE`,
+        [orderId]
+      );
+
+      if (!request) {
+        const error = new Error(
+          "This order does not have a pending cancellation request."
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+
+      await connection.query(
+        `UPDATE order_cancellation_requests
+         SET status = 'Rejected',
+             reviewed_by = ?,
+             admin_note = ?,
+             reviewed_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [req.user.id, adminNote, request.id]
+      );
+      await connection.commit();
+      res.json({ message: "Cancellation request rejected." });
+    } catch (error) {
+      await connection.rollback();
+      console.error("Cancellation request rejection error:", error);
+      res.status(error.statusCode || 500).json({
+        message: error.message || "Could not reject cancellation request.",
+      });
+    } finally {
+      connection.release();
+    }
+  }
+);
 
 app.post(
   "/admin/orders/:id/refund/sync",
@@ -2045,6 +2189,11 @@ app.get("/orders", auth, async (req, res) => {
         o.payment_status,
         o.status,
         o.created_at,
+        cr.status AS cancellation_request_status,
+        cr.reason AS cancellation_request_reason,
+        cr.admin_note AS cancellation_request_admin_note,
+        cr.requested_at AS cancellation_requested_at,
+        cr.reviewed_at AS cancellation_reviewed_at,
         a.name AS address_name,
         a.street,
         a.city,
@@ -2057,6 +2206,7 @@ app.get("/orders", auth, async (req, res) => {
       JOIN order_items oi ON o.id = oi.order_id
       JOIN products p ON oi.product_id = p.id
       JOIN addresses a ON o.address_id = a.id
+      LEFT JOIN order_cancellation_requests cr ON cr.order_id = o.id
       LEFT JOIN (
         SELECT product_id, MIN(image_url) AS image_url
         FROM product_images
@@ -2078,6 +2228,12 @@ app.get("/orders", auth, async (req, res) => {
           payment_status: row.payment_status,
           status: row.status,
           created_at: row.created_at,
+          cancellation_request_status: row.cancellation_request_status,
+          cancellation_request_reason: row.cancellation_request_reason,
+          cancellation_request_admin_note:
+            row.cancellation_request_admin_note,
+          cancellation_requested_at: row.cancellation_requested_at,
+          cancellation_reviewed_at: row.cancellation_reviewed_at,
           address_name: row.address_name,
           street: row.street,
           city: row.city,
@@ -2099,6 +2255,112 @@ app.get("/orders", auth, async (req, res) => {
   } catch (err) {
     console.error("Failed to fetch orders:", err);
     res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+
+
+// POST /orders/:orderId/cancellation-request
+app.post("/orders/:orderId/cancellation-request", auth, async (req, res) => {
+  const userId = req.user.id;
+  const orderId = Number(req.params.orderId);
+  const reason = String(req.body?.reason || "").trim();
+
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    return res.status(400).json({ message: "Invalid order ID." });
+  }
+
+  if (reason.length < 10 || reason.length > 500) {
+    return res.status(400).json({
+      message: "Please provide a reason between 10 and 500 characters.",
+    });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [[order]] = await connection.query(
+      `SELECT
+         o.id,
+         o.payment_method,
+         o.payment_status,
+         o.status,
+         cr.id AS request_id,
+         cr.status AS request_status
+       FROM orders o
+       LEFT JOIN order_cancellation_requests cr ON cr.order_id = o.id
+       WHERE o.id = ? AND o.user_id = ?
+       FOR UPDATE`,
+      [orderId, userId]
+    );
+
+    if (!order) {
+      const error = new Error("Order not found.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (
+      order.payment_method !== "Razorpay" ||
+      order.payment_status !== "Paid"
+    ) {
+      const error = new Error(
+        "Cancellation requests are available for paid online orders."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (!["Placed", "Packed"].includes(order.status)) {
+      const error = new Error(
+        "This order can no longer be cancelled because fulfilment has progressed."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (["Pending", "Approved"].includes(order.request_status)) {
+      const error = new Error(
+        order.request_status === "Pending"
+          ? "A cancellation request is already awaiting review."
+          : "This cancellation request has already been approved."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (order.request_id) {
+      await connection.query(
+        `UPDATE order_cancellation_requests
+         SET reason = ?,
+             status = 'Pending',
+             reviewed_by = NULL,
+             admin_note = NULL,
+             requested_at = CURRENT_TIMESTAMP,
+             reviewed_at = NULL
+         WHERE id = ?`,
+        [reason, order.request_id]
+      );
+    } else {
+      await connection.query(
+        `INSERT INTO order_cancellation_requests
+           (order_id, user_id, reason)
+         VALUES (?, ?, ?)`,
+        [orderId, userId, reason]
+      );
+    }
+
+    await connection.commit();
+    res.status(201).json({
+      message: "Cancellation request sent for admin review.",
+      cancellation_request_status: "Pending",
+      cancellation_request_reason: reason,
+    });
+  } catch (err) {
+    await connection.rollback();
+    sendCheckoutError(res, err, "Could not submit cancellation request.");
+  } finally {
+    connection.release();
   }
 });
 
@@ -2129,7 +2391,7 @@ app.delete("/orders/:orderId", auth, async (req, res) => {
 
     if (order.payment_method === "Razorpay" && order.payment_status === "Paid") {
       const error = new Error(
-        "Online-payment cancellation requires a refund and is not available yet."
+        "Submit a cancellation request for this paid online order."
       );
       error.statusCode = 409;
       throw error;

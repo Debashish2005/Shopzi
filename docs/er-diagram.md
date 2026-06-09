@@ -5,6 +5,8 @@ erDiagram
     USERS ||--o{ ADDRESSES : has
     USERS ||--o{ CART_ITEMS : owns
     USERS ||--o{ ORDERS : places
+    USERS ||--o{ ORDER_CANCELLATION_REQUESTS : submits
+    USERS ||--o{ ORDER_CANCELLATION_REQUESTS : reviews
     USERS ||--o{ PASSWORD_RESET_TOKENS : requests
     PRODUCTS ||--o{ PRODUCT_IMAGES : has
     PRODUCTS ||--o{ CART_ITEMS : appears_in
@@ -13,6 +15,7 @@ erDiagram
     ORDERS ||--|{ ORDER_ITEMS : contains
     ORDERS ||--o| PAYMENTS : paid_through
     ORDERS ||--o| REFUNDS : may_create
+    ORDERS ||--o| ORDER_CANCELLATION_REQUESTS : may_receive
     PAYMENTS ||--o| REFUNDS : reversed_by
 
     USERS {
@@ -115,6 +118,19 @@ erDiagram
         TIMESTAMP updated_at
     }
 
+    ORDER_CANCELLATION_REQUESTS {
+        INT id PK
+        INT order_id FK,UK
+        INT user_id FK
+        VARCHAR reason
+        ENUM status
+        INT reviewed_by FK
+        VARCHAR admin_note
+        TIMESTAMP requested_at
+        TIMESTAMP reviewed_at
+        TIMESTAMP updated_at
+    }
+
     PASSWORD_RESET_TOKENS {
         INT id PK
         INT user_id FK
@@ -131,5 +147,7 @@ erDiagram
 - One order contains one or more order item rows.
 - One online order has at most one Shopzi payment record.
 - One paid online order can have at most one full-refund record.
+- One paid online order can have at most one cancellation-request record, which can be resubmitted after rejection.
+- A cancellation request belongs to the customer who submitted it and can reference the administrator who reviewed it.
 - `order_items.price` stores the product price at purchase time so old orders keep their original price even if the product price later changes.
 - `products.is_active` supports soft deletion: archived products disappear from the storefront while existing order-item foreign keys remain valid.

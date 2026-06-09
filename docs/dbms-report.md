@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Shopzi is an e-commerce DBMS project built with a React frontend, Node.js/Express backend, and MySQL database. The database stores users, addresses, products, product images, cart items, orders, order items, Razorpay payment and refund records, and password reset tokens. The backend performs authenticated CRUD operations and uses SQL joins and transactions for order placement, refunds, and payment processing.
+Shopzi is an e-commerce DBMS project built with a React frontend, Node.js/Express backend, and MySQL database. The database stores users, addresses, products, product images, cart items, orders, order items, Razorpay payment and refund records, cancellation requests, and password reset tokens. The backend performs authenticated CRUD operations and uses SQL joins and transactions for order placement, refunds, cancellation review, and payment processing.
 
 ## Database Design
 
@@ -17,6 +17,7 @@ The database name is `shopzi`, using `utf8mb4` character encoding for broad Unic
 - `order_items`: products inside each order, including quantity and price snapshot.
 - `payments`: Razorpay order/payment identifiers, amount, method, status, and failure details.
 - `refunds`: auditable Razorpay refund identifier, amount, processing state, and failure details for a paid order.
+- `order_cancellation_requests`: customer reason, review state, reviewing administrator, decision note, and timestamps for paid-order cancellation requests.
 - `password_reset_tokens`: reset tokens linked to users.
 
 ## Normalization
@@ -43,6 +44,8 @@ Some denormalized snapshot data is intentionally stored in `order_items.price`. 
 - `orders` to `payments`: one-to-zero-or-one.
 - `orders` to `refunds`: one-to-zero-or-one.
 - `payments` to `refunds`: one-to-zero-or-one for the current full-refund workflow.
+- `orders` to `order_cancellation_requests`: one-to-zero-or-one, allowing a rejected request to be resubmitted without creating duplicate active rows.
+- `users` to `order_cancellation_requests`: one-to-many for customer submissions and administrator reviews.
 
 ## Constraints And Indexes
 
@@ -54,6 +57,8 @@ Primary keys uniquely identify each table row. Foreign keys enforce referential 
 - Unique reset token in `password_reset_tokens`.
 - Unique Razorpay order ID, payment ID, and Shopzi order reference in `payments`.
 - Unique Shopzi order and Razorpay refund ID in `refunds`, preventing duplicate full-refund records.
+- Unique order ID in `order_cancellation_requests`, preventing multiple simultaneous requests for one order.
+- Restricted `Pending`, `Approved`, and `Rejected` cancellation-review states, with a required customer reason.
 - Check constraints for positive prices, stock, quantities, ratings, and valid order statuses.
 - An `is_active` product flag and composite active/stock index for storefront filtering and low-stock reporting.
 - Cascading deletes for dependent records such as addresses, cart items, product images, order items, and password reset tokens.
@@ -64,9 +69,9 @@ Indexes are added on common lookup columns such as user IDs, product IDs, catego
 
 The backend implements CRUD operations across the major entities:
 
-- Create: signup, add address, add product, add cart item, place order, create Razorpay payment/refund records, create password reset token.
+- Create: signup, add address, add product, add cart item, place order, create Razorpay payment/refund records, submit a cancellation request, create password reset token.
 - Read: login user lookup, profile fetch, address list, product search, product details, cart view, order history, admin metrics, users, inventory, and order queues.
-- Update: profile update, address update, password change, persisted cart quantity, product details and stock, user roles, payment/refund verification, and fulfillment status.
+- Update: profile update, address update, password change, persisted cart quantity, product details and stock, user roles, cancellation approval/rejection, payment/refund verification, and fulfillment status.
 - Delete: address delete, cart item removal, order cancellation, password reset token cleanup, and product archival.
 
 All user-scoped operations use the authenticated user ID to prevent one user from accessing or modifying another user's data. Administrative operations also verify the current role from MySQL, so hiding an admin control in React is not treated as a security boundary.
@@ -79,6 +84,7 @@ The app uses joins for meaningful multi-table views:
 
 - Cart loading joins `cart_items` with `products` to display product names, prices, quantities, and images.
 - Order history joins `orders`, `order_items`, `products`, and product image data to show complete order details.
+- Customer and admin order views join `order_cancellation_requests` so review state and decision notes are displayed without replacing the actual fulfilment status.
 - Product listing uses a subquery to fetch a primary product image for each product.
 - The admin dashboard joins users, orders, addresses, order items, products, and image summaries to show revenue, customer activity, fulfillment queues, and low-stock inventory.
 
@@ -91,6 +97,8 @@ Order placement uses database transactions. The backend validates the user's add
 For online checkout, the backend creates a Razorpay Test Mode order and stores its identifier in `payments`. After checkout, it verifies the HMAC signature and fetches the payment from Razorpay to confirm that the amount, currency, order ID, and captured status match. A successful verification updates `payments` and `orders` atomically. Closing or failing the test checkout marks the payment as failed and restores reserved stock.
 
 For administrative full refunds, the backend first verifies that the Razorpay payment is captured and that the amount matches Shopzi's payment record. It then creates a normal Razorpay Test Mode refund in paise and stores the refund ID and state in `refunds`. Accepted refunds cancel the order and restore stock exactly once. Pending refunds can be synchronized from Razorpay, while failed attempts retain their reason for audit and retry.
+
+For customer-initiated online cancellations, the customer submits a reason while the order is still `Placed` or `Packed`. The request is stored separately as `Pending`, so the fulfilment status remains accurate. An administrator can reject it with a customer-visible note or approve it. Approval calls the same verified Razorpay refund workflow; only after Razorpay accepts the refund are the request marked `Approved`, the order cancelled, and stock restored. If Razorpay fails, the request remains pending for a safe retry.
 
 This is important because checkout changes several related tables. Transactions prevent partial orders, duplicate stock reduction, and inconsistent payment states.
 

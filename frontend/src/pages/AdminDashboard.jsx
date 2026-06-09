@@ -4,12 +4,14 @@ import toast, { Toaster } from "react-hot-toast";
 import {
   Archive,
   Boxes,
+  CheckCircle2,
   CircleDollarSign,
   ClipboardList,
   Edit3,
   ExternalLink,
   LayoutDashboard,
   LoaderCircle,
+  MessageSquareText,
   PackagePlus,
   RefreshCw,
   RotateCcw,
@@ -75,6 +77,8 @@ function StatusBadge({ status }) {
     Shipped: "bg-amber-50 text-amber-800 border-amber-200",
     Delivered: "bg-emerald-50 text-emerald-700 border-emerald-200",
     Cancelled: "bg-red-50 text-red-700 border-red-200",
+    "Cancellation Requested":
+      "bg-orange-50 text-orange-800 border-orange-200",
     Paid: "bg-emerald-50 text-emerald-700 border-emerald-200",
     Pending: "bg-amber-50 text-amber-800 border-amber-200",
     Failed: "bg-red-50 text-red-700 border-red-200",
@@ -325,6 +329,106 @@ function ProductModal({ mode, product, onClose, onSaved }) {
   );
 }
 
+function CancellationRejectionModal({
+  order,
+  onClose,
+  onSubmit,
+  submitting,
+}) {
+  const [adminNote, setAdminNote] = useState("");
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    onSubmit(adminNote.trim());
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-5">
+      <div
+        className="w-full bg-white shadow-xl sm:max-w-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rejection-title"
+      >
+        <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
+          <div>
+            <h2 id="rejection-title" className="text-lg font-bold text-gray-950">
+              Reject cancellation request
+            </h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Explain why order #{order.id} cannot be cancelled. The customer
+              will see this note.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="grid h-9 w-9 shrink-0 place-items-center text-gray-500 hover:bg-gray-100 disabled:opacity-50"
+            aria-label="Close rejection form"
+            title="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4 p-5">
+          <div className="border border-orange-200 bg-orange-50 p-3 text-sm text-orange-950">
+            <p className="font-semibold">Customer reason</p>
+            <p className="mt-1 leading-5">
+              {order.cancellation_request_reason}
+            </p>
+          </div>
+          <div>
+            <label
+              htmlFor="rejection-note"
+              className="text-sm font-semibold text-gray-800"
+            >
+              Rejection note
+            </label>
+            <textarea
+              id="rejection-note"
+              required
+              minLength={3}
+              maxLength={500}
+              rows={4}
+              autoFocus
+              value={adminNote}
+              onChange={(event) => setAdminNote(event.target.value)}
+              placeholder="For example, this order has already been dispatched."
+              className="mt-2 w-full resize-none border border-gray-300 px-3 py-2.5 text-sm outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
+            />
+            <p className="mt-1 text-right text-xs text-gray-500">
+              {adminNote.length}/500
+            </p>
+          </div>
+
+          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={submitting}
+              className="h-10 border border-gray-300 px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Back
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || adminNote.trim().length < 3}
+              className="flex h-10 items-center justify-center gap-2 bg-red-600 px-5 text-sm font-semibold text-white hover:bg-red-700 disabled:bg-gray-400"
+            >
+              {submitting && (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+              )}
+              Reject request
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const [currentUser, setCurrentUser] = useState(null);
@@ -339,6 +443,7 @@ export default function AdminDashboard() {
   const [productFilter, setProductFilter] = useState("all");
   const [orderFilter, setOrderFilter] = useState("all");
   const [productModal, setProductModal] = useState(null);
+  const [rejectionOrder, setRejectionOrder] = useState(null);
   const [updatingId, setUpdatingId] = useState(null);
 
   const loadAdminData = useCallback(async (showRefresh = false) => {
@@ -493,6 +598,56 @@ export default function AdminDashboard() {
       await refresh();
     } catch (error) {
       toast.error(error.response?.data?.message || "Could not refund payment");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const approveCancellationRequest = async (order) => {
+    if (
+      !window.confirm(
+        `Approve cancellation for order #${order.id} and refund ${formatMoney(
+          order.total_amount
+        )}?`
+      )
+    ) {
+      return;
+    }
+
+    setUpdatingId(`cancellation-${order.id}`);
+    try {
+      const response = await api.post(
+        `/admin/orders/${order.id}/cancellation-request/approve`
+      );
+      toast.success(response.data.message);
+      await refresh();
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message ||
+          "Could not approve cancellation request"
+      );
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const rejectCancellationRequest = async (adminNote) => {
+    if (!rejectionOrder) return;
+
+    setUpdatingId(`cancellation-${rejectionOrder.id}`);
+    try {
+      const response = await api.post(
+        `/admin/orders/${rejectionOrder.id}/cancellation-request/reject`,
+        { admin_note: adminNote }
+      );
+      toast.success(response.data.message);
+      setRejectionOrder(null);
+      await refresh();
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message ||
+          "Could not reject cancellation request"
+      );
     } finally {
       setUpdatingId(null);
     }
@@ -1045,7 +1200,7 @@ export default function AdminDashboard() {
               (filteredOrders.length ? (
                 <div className="overflow-hidden border border-gray-300 bg-white">
                   <div className="hidden overflow-x-auto md:block">
-                    <table className="w-full min-w-[1020px] text-left text-sm">
+                    <table className="w-full min-w-[1140px] text-left text-sm">
                       <thead className="border-b border-gray-200 bg-gray-50 text-xs uppercase text-gray-500">
                         <tr>
                           <th className="px-4 py-3 font-semibold">Order</th>
@@ -1066,6 +1221,18 @@ export default function AdminDashboard() {
                               <p className="text-xs text-gray-500">
                                 {formatDate(order.created_at)} · {order.item_count} item(s)
                               </p>
+                              {order.cancellation_request_status ===
+                                "Pending" && (
+                                <div className="mt-2 max-w-64">
+                                  <StatusBadge status="Cancellation Requested" />
+                                  <p
+                                    className="mt-1 truncate text-xs text-orange-800"
+                                    title={order.cancellation_request_reason}
+                                  >
+                                    {order.cancellation_request_reason}
+                                  </p>
+                                </div>
+                              )}
                             </td>
                             <td className="px-4 py-3">
                               <p className="font-semibold">{order.full_name}</p>
@@ -1085,7 +1252,9 @@ export default function AdminDashboard() {
                                 value={order.status}
                                 disabled={
                                   updatingId === `order-${order.id}` ||
-                                  order.status === "Cancelled"
+                                  order.status === "Cancelled" ||
+                                  order.cancellation_request_status ===
+                                    "Pending"
                                 }
                                 onChange={(event) =>
                                   updateOrderStatus(order, event.target.value)
@@ -1108,9 +1277,47 @@ export default function AdminDashboard() {
                               </select>
                             </td>
                             <td className="px-4 py-3">
-                              <div className="flex justify-end">
+                              <div className="flex flex-wrap justify-end gap-2">
+                                {order.cancellation_request_status ===
+                                  "Pending" && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        approveCancellationRequest(order)
+                                      }
+                                      disabled={
+                                        updatingId ===
+                                        `cancellation-${order.id}`
+                                      }
+                                      className="flex h-9 items-center gap-2 bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700 disabled:bg-gray-400"
+                                    >
+                                      {updatingId ===
+                                      `cancellation-${order.id}` ? (
+                                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                                      ) : (
+                                        <CheckCircle2 className="h-4 w-4" />
+                                      )}
+                                      Approve & refund
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setRejectionOrder(order)}
+                                      disabled={
+                                        updatingId ===
+                                        `cancellation-${order.id}`
+                                      }
+                                      className="flex h-9 items-center gap-2 border border-red-200 px-3 text-xs font-bold text-red-700 hover:bg-red-50 disabled:text-gray-400"
+                                    >
+                                      <X className="h-4 w-4" />
+                                      Reject
+                                    </button>
+                                  </>
+                                )}
                                 {order.payment_method === "Razorpay" &&
                                   order.payment_status === "Paid" &&
+                                  order.cancellation_request_status !==
+                                    "Pending" &&
                                   (!order.refund_status ||
                                     order.refund_status === "Failed") && (
                                     <button
@@ -1187,6 +1394,19 @@ export default function AdminDashboard() {
                             {order.email}
                           </p>
                         </div>
+                        {order.cancellation_request_status === "Pending" && (
+                          <div className="border border-orange-200 bg-orange-50 p-3 text-sm text-orange-950">
+                            <div className="flex items-center gap-2">
+                              <MessageSquareText className="h-4 w-4 text-orange-700" />
+                              <p className="font-semibold">
+                                Cancellation requested
+                              </p>
+                            </div>
+                            <p className="mt-2 leading-5">
+                              {order.cancellation_request_reason}
+                            </p>
+                          </div>
+                        )}
                         <div className="flex flex-wrap items-center justify-between gap-3">
                           <div className="flex items-center gap-2">
                             <span className="text-xs text-gray-500">
@@ -1198,7 +1418,8 @@ export default function AdminDashboard() {
                             value={order.status}
                             disabled={
                               updatingId === `order-${order.id}` ||
-                              order.status === "Cancelled"
+                              order.status === "Cancelled" ||
+                              order.cancellation_request_status === "Pending"
                             }
                             onChange={(event) =>
                               updateOrderStatus(order, event.target.value)
@@ -1220,8 +1441,42 @@ export default function AdminDashboard() {
                             ))}
                           </select>
                         </div>
+                        {order.cancellation_request_status === "Pending" && (
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                approveCancellationRequest(order)
+                              }
+                              disabled={
+                                updatingId === `cancellation-${order.id}`
+                              }
+                              className="flex h-10 items-center justify-center gap-2 bg-emerald-600 px-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:bg-gray-400"
+                            >
+                              {updatingId ===
+                              `cancellation-${order.id}` ? (
+                                <LoaderCircle className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <CheckCircle2 className="h-4 w-4" />
+                              )}
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRejectionOrder(order)}
+                              disabled={
+                                updatingId === `cancellation-${order.id}`
+                              }
+                              className="flex h-10 items-center justify-center gap-2 border border-red-200 px-3 text-sm font-bold text-red-700 hover:bg-red-50 disabled:text-gray-400"
+                            >
+                              <X className="h-4 w-4" />
+                              Reject
+                            </button>
+                          </div>
+                        )}
                         {order.payment_method === "Razorpay" &&
                           order.payment_status === "Paid" &&
+                          order.cancellation_request_status !== "Pending" &&
                           (!order.refund_status ||
                             order.refund_status === "Failed") && (
                             <button
@@ -1399,6 +1654,18 @@ export default function AdminDashboard() {
           }
           onClose={() => setProductModal(null)}
           onSaved={refresh}
+        />
+      )}
+      {rejectionOrder && (
+        <CancellationRejectionModal
+          order={rejectionOrder}
+          onClose={() => {
+            if (updatingId !== `cancellation-${rejectionOrder.id}`) {
+              setRejectionOrder(null);
+            }
+          }}
+          onSubmit={rejectCancellationRequest}
+          submitting={updatingId === `cancellation-${rejectionOrder.id}`}
         />
       )}
     </div>
