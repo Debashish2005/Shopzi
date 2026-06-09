@@ -8,7 +8,7 @@ Shopzi is an e-commerce DBMS project built with a React frontend, Node.js/Expres
 
 The database name is `shopzi`, using `utf8mb4` character encoding for broad Unicode support. The main entities are:
 
-- `users`: customer account and login identity.
+- `users`: customer account, login identity, and authorization role.
 - `addresses`: saved delivery addresses owned by users.
 - `products`: product catalog details such as price, category, stock, rating, and review count.
 - `product_images`: separate image records for products, allowing multiple images per product.
@@ -46,6 +46,7 @@ Some denormalized snapshot data is intentionally stored in `order_items.price`. 
 Primary keys uniquely identify each table row. Foreign keys enforce referential integrity between parent and child tables. Important constraints include:
 
 - Unique email and mobile number in `users`.
+- Restricted `customer` and `admin` roles in `users`.
 - Unique product per user in `cart_items`, preventing duplicate cart rows for the same user and product.
 - Unique reset token in `password_reset_tokens`.
 - Unique Razorpay order ID, payment ID, and Shopzi order reference in `payments`.
@@ -63,7 +64,7 @@ The backend implements CRUD operations across the major entities:
 - Update: profile update, address update, password change, cart quantity update, payment verification, order/payment status update.
 - Delete: address delete, cart item removal, order cancellation, password reset token cleanup.
 
-All user-scoped operations use the authenticated user ID to prevent one user from accessing or modifying another user's data.
+All user-scoped operations use the authenticated user ID to prevent one user from accessing or modifying another user's data. Administrative operations also verify the current role from MySQL, so hiding an admin control in React is not treated as a security boundary.
 
 ## Joins And Queries
 

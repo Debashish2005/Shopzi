@@ -23,6 +23,7 @@ CREATE TABLE users (
   email VARCHAR(100) NOT NULL,
   mobile VARCHAR(15) NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
+  role ENUM('customer', 'admin') NOT NULL DEFAULT 'customer',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
   PRIMARY KEY (id),
@@ -198,9 +199,9 @@ START TRANSACTION;
 -- Sample users. Demo passwords:
 -- Riya Sharma: Password@123
 -- Arjun Mehta: Demo@12345
-INSERT INTO users (id, full_name, email, mobile, password_hash) VALUES
-(1, 'Riya Sharma', 'riya.sharma@example.com', '9876543210', '$2b$10$SW5RweukwO3I.J7/cJU5uOhNKZ4bm4RPocj7cNsU5adp0gPtF937y'),
-(2, 'Arjun Mehta', 'arjun.mehta@example.com', '9123456780', '$2b$10$OgmY0mvGqb8SjulNXOBKZOs4CF5mVbuMXuKbpoi8O3rqKy9P/aZeO');
+INSERT INTO users (id, full_name, email, mobile, password_hash, role) VALUES
+(1, 'Riya Sharma', 'riya.sharma@example.com', '9876543210', '$2b$10$SW5RweukwO3I.J7/cJU5uOhNKZ4bm4RPocj7cNsU5adp0gPtF937y', 'admin'),
+(2, 'Arjun Mehta', 'arjun.mehta@example.com', '9123456780', '$2b$10$OgmY0mvGqb8SjulNXOBKZOs4CF5mVbuMXuKbpoi8O3rqKy9P/aZeO', 'customer');
 
 INSERT INTO addresses (id, user_id, name, street, city, state, pincode) VALUES
 (1, 1, 'Riya Sharma', '221 MG Road', 'Bengaluru', 'Karnataka', '560001'),

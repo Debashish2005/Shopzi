@@ -3,6 +3,7 @@ import Header from "../components/header";
 import ProductCard from "../components/ProductCard";
 import Footer from "../components/footer";
 import api from "../api/axios";
+import { Plus } from "lucide-react";
 
 function SkeletonCard() {
   return (
@@ -255,7 +256,7 @@ const handleSubmit = async (e) => {
     setImages([]);
   } catch (err) {
     console.error("Upload error", err);
-    alert("Failed to upload");
+    alert(err.response?.data?.message || "Failed to upload product");
   }
 };
 
@@ -284,24 +285,25 @@ useEffect(() => {
 }, [searchTerm]);
 
 
-  const allDummyProducts = dummySections.flatMap(section => section.products);
   const handleSearch = (term) => {
   setSearchTerm(term);
 };
+  const isAdmin = user?.role === "admin";
 
 
   return (
     <>
       <Header onSearch={handleSearch} />
 
-{user && user.id === 1 && user.full_name === "debashish mallick" && (
+{isAdmin && (
 
   <div className="flex justify-end px-4 mt-2">
     <button
       onClick={() => setShowAddForm(true)}
-      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow"
+      className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow"
     >
-      + Add Product
+      <Plus className="h-4 w-4" />
+      Add Product
     </button>
   </div>
 )}
@@ -357,7 +359,7 @@ useEffect(() => {
     </div>
   )}
 </main>
-{showAddForm && (
+{showAddForm && isAdmin && (
   <div className="fixed inset-0 bg-black bg-opacity-40 flex justify-center items-start pt-10 z-50">
     <div className="bg-white rounded-lg p-6 w-full max-w-xl shadow-lg relative">
       <button
@@ -366,19 +368,7 @@ useEffect(() => {
       >
         ×
       </button>
-      {user && user.id === 4 && user.name === "debashish mallick" && (
-  <div className="flex justify-end px-4 mt-2">
-    <button
-      onClick={() => setShowAddForm(true)}
-      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow"
-    >
-      + Add Product
-    </button>
-  </div>
-)}
-
-      
-      {/* You'll build this form next */}
+      <h2 className="mb-4 text-xl font-semibold text-gray-900">Add product</h2>
  <form
   onSubmit={handleSubmit}
   className="space-y-4"

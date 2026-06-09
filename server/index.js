@@ -65,6 +65,31 @@ function auth(req, res, next) {
   }
 }
 
+async function requireAdmin(req, res, next) {
+  try {
+    const [[user]] = await db.execute(
+      "SELECT role FROM users WHERE id = ? LIMIT 1",
+      [req.user.id]
+    );
+
+    if (!user) {
+      return res.status(401).json({ message: "User account not found." });
+    }
+
+    if (user.role !== "admin") {
+      return res.status(403).json({
+        message: "Administrator access is required.",
+      });
+    }
+
+    req.user.role = user.role;
+    next();
+  } catch (error) {
+    console.error("Admin authorization failed:", error);
+    res.status(500).json({ message: "Could not verify administrator access." });
+  }
+}
+
 
 app.post('/signup', async (req, res) => {
   const { full_name, email, mobile, password } = req.body;
@@ -265,7 +290,7 @@ app.post("/reset-password", async (req, res) => {
 app.get('/me', auth, async (req, res) => {
   try {
     const [rows] = await db.execute(
-      'SELECT id, full_name, email, mobile FROM users WHERE id = ?',
+      'SELECT id, full_name, email, mobile, role FROM users WHERE id = ?',
       [req.user.id]
     );
 
@@ -289,7 +314,10 @@ app.put("/me", auth, async (req, res) => {
       "UPDATE users SET full_name = ?, email = ?, mobile = ? WHERE id = ?",
       [full_name, email, mobile, userId]
     );
-    const [updatedUser] = await db.query("SELECT id, full_name, email, mobile FROM users WHERE id = ?", [userId]);
+    const [updatedUser] = await db.query(
+      "SELECT id, full_name, email, mobile, role FROM users WHERE id = ?",
+      [userId]
+    );
     res.json(updatedUser[0]);
   } catch (err) {
     console.error("Failed to update user", err);
@@ -413,32 +441,70 @@ app.delete("/addresses/:id", auth, async (req, res) => {
   }
 });
 
-app.post("/add-product", upload.array("images", 5), async (req, res) => {
-  const { name, price, original_price, description, stock, category } = req.body;
-  const imageUrls = req.files.map(file => file.path);
+app.post(
+  "/add-product",
+  auth,
+  requireAdmin,
+  upload.array("images", 5),
+  async (req, res) => {
+    const { name, price, original_price, description, stock, category } =
+      req.body;
+    const imageUrls = (req.files || []).map((file) => file.path);
+    const parsedPrice = Number(price);
+    const parsedOriginalPrice =
+      original_price === undefined || original_price === ""
+        ? null
+        : Number(original_price);
+    const parsedStock = Number(stock);
 
-  try {
-    const [result] = await db.query(
-      `INSERT INTO products (name, price, original_price, description, stock, category)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [name, price, original_price || null, description, stock, category || null]
-    );
-
-    const productId = result.insertId;
-
-    for (const url of imageUrls) {
-      await db.query(`INSERT INTO product_images (product_id, image_url) VALUES (?, ?)`, [
-        productId,
-        url,
-      ]);
+    if (
+      !name?.trim() ||
+      !description?.trim() ||
+      !Number.isFinite(parsedPrice) ||
+      parsedPrice < 0 ||
+      (parsedOriginalPrice !== null &&
+        (!Number.isFinite(parsedOriginalPrice) || parsedOriginalPrice < 0)) ||
+      !Number.isInteger(parsedStock) ||
+      parsedStock < 0 ||
+      imageUrls.length === 0
+    ) {
+      return res.status(400).json({
+        message: "Provide valid product details and at least one image.",
+      });
     }
 
-    res.status(201).json({ message: "Product added successfully!" });
-  } catch (err) {
-    console.error("Add product error:", err);
-    res.status(500).json({ message: "Something went wrong" });
+    try {
+      const [result] = await db.query(
+        `INSERT INTO products
+           (name, price, original_price, description, stock, category)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          name.trim(),
+          parsedPrice,
+          parsedOriginalPrice,
+          description.trim(),
+          parsedStock,
+          category?.trim() || null,
+        ]
+      );
+
+      const productId = result.insertId;
+
+      for (const url of imageUrls) {
+        await db.query(
+          `INSERT INTO product_images (product_id, image_url)
+           VALUES (?, ?)`,
+          [productId, url]
+        );
+      }
+
+      res.status(201).json({ message: "Product added successfully!" });
+    } catch (err) {
+      console.error("Add product error:", err);
+      res.status(500).json({ message: "Something went wrong" });
+    }
   }
-});
+);
 
 
 

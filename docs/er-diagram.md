@@ -19,6 +19,7 @@ erDiagram
         VARCHAR email UK
         VARCHAR mobile UK
         VARCHAR password_hash
+        ENUM role
         TIMESTAMP created_at
     }
 
