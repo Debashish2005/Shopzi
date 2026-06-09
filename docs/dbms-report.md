@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Shopzi is an e-commerce DBMS project built with a React frontend, Node.js/Express backend, and MySQL database. The database stores users, addresses, products, product images, cart items, orders, order items, Razorpay payment records, and password reset tokens. The backend performs authenticated CRUD operations and uses SQL joins and transactions for order placement and payment processing.
+Shopzi is an e-commerce DBMS project built with a React frontend, Node.js/Express backend, and MySQL database. The database stores users, addresses, products, product images, cart items, orders, order items, Razorpay payment and refund records, and password reset tokens. The backend performs authenticated CRUD operations and uses SQL joins and transactions for order placement, refunds, and payment processing.
 
 ## Database Design
 
@@ -16,6 +16,7 @@ The database name is `shopzi`, using `utf8mb4` character encoding for broad Unic
 - `orders`: order header information such as user, address, total, payment method, and status.
 - `order_items`: products inside each order, including quantity and price snapshot.
 - `payments`: Razorpay order/payment identifiers, amount, method, status, and failure details.
+- `refunds`: auditable Razorpay refund identifier, amount, processing state, and failure details for a paid order.
 - `password_reset_tokens`: reset tokens linked to users.
 
 ## Normalization
@@ -40,6 +41,8 @@ Some denormalized snapshot data is intentionally stored in `order_items.price`. 
 - `products` to `order_items`: one-to-many.
 - `addresses` to `orders`: one-to-many.
 - `orders` to `payments`: one-to-zero-or-one.
+- `orders` to `refunds`: one-to-zero-or-one.
+- `payments` to `refunds`: one-to-zero-or-one for the current full-refund workflow.
 
 ## Constraints And Indexes
 
@@ -50,6 +53,7 @@ Primary keys uniquely identify each table row. Foreign keys enforce referential 
 - Unique product per user in `cart_items`, preventing duplicate cart rows for the same user and product.
 - Unique reset token in `password_reset_tokens`.
 - Unique Razorpay order ID, payment ID, and Shopzi order reference in `payments`.
+- Unique Shopzi order and Razorpay refund ID in `refunds`, preventing duplicate full-refund records.
 - Check constraints for positive prices, stock, quantities, ratings, and valid order statuses.
 - An `is_active` product flag and composite active/stock index for storefront filtering and low-stock reporting.
 - Cascading deletes for dependent records such as addresses, cart items, product images, order items, and password reset tokens.
@@ -60,9 +64,9 @@ Indexes are added on common lookup columns such as user IDs, product IDs, catego
 
 The backend implements CRUD operations across the major entities:
 
-- Create: signup, add address, add product, add cart item, place order, create Razorpay payment order, create password reset token.
+- Create: signup, add address, add product, add cart item, place order, create Razorpay payment/refund records, create password reset token.
 - Read: login user lookup, profile fetch, address list, product search, product details, cart view, order history, admin metrics, users, inventory, and order queues.
-- Update: profile update, address update, password change, cart quantity update, product details and stock, user roles, payment verification, and fulfillment status.
+- Update: profile update, address update, password change, persisted cart quantity, product details and stock, user roles, payment/refund verification, and fulfillment status.
 - Delete: address delete, cart item removal, order cancellation, password reset token cleanup, and product archival.
 
 All user-scoped operations use the authenticated user ID to prevent one user from accessing or modifying another user's data. Administrative operations also verify the current role from MySQL, so hiding an admin control in React is not treated as a security boundary.
@@ -86,9 +90,11 @@ Order placement uses database transactions. The backend validates the user's add
 
 For online checkout, the backend creates a Razorpay Test Mode order and stores its identifier in `payments`. After checkout, it verifies the HMAC signature and fetches the payment from Razorpay to confirm that the amount, currency, order ID, and captured status match. A successful verification updates `payments` and `orders` atomically. Closing or failing the test checkout marks the payment as failed and restores reserved stock.
 
+For administrative full refunds, the backend first verifies that the Razorpay payment is captured and that the amount matches Shopzi's payment record. It then creates a normal Razorpay Test Mode refund in paise and stores the refund ID and state in `refunds`. Accepted refunds cancel the order and restore stock exactly once. Pending refunds can be synchronized from Razorpay, while failed attempts retain their reason for audit and retry.
+
 This is important because checkout changes several related tables. Transactions prevent partial orders, duplicate stock reduction, and inconsistent payment states.
 
-Administrative cancellation and product archival also use transactions. Cancelling an eligible order restores inventory exactly once, while archiving a product updates its catalog state and removes active cart references together. Paid Razorpay orders cannot be cancelled from the dashboard without a refund workflow.
+Administrative cancellation, refunds, and product archival also use transactions. Cancelling an eligible order restores inventory exactly once, while archiving a product updates its catalog state and removes active cart references together. Paid Razorpay orders are cancelled only through the refund workflow.
 
 ## Administrative Reporting
 

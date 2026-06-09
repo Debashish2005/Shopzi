@@ -78,6 +78,9 @@ function StatusBadge({ status }) {
     Paid: "bg-emerald-50 text-emerald-700 border-emerald-200",
     Pending: "bg-amber-50 text-amber-800 border-amber-200",
     Failed: "bg-red-50 text-red-700 border-red-200",
+    RefundPending: "bg-amber-50 text-amber-800 border-amber-200",
+    Refunded: "bg-cyan-50 text-cyan-800 border-cyan-200",
+    Processed: "bg-cyan-50 text-cyan-800 border-cyan-200",
   };
 
   return (
@@ -469,6 +472,44 @@ export default function AdminDashboard() {
       await refresh();
     } catch (error) {
       toast.error(error.response?.data?.message || "Could not update order");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const refundOrder = async (order) => {
+    if (
+      !window.confirm(
+        `Refund ${formatMoney(order.total_amount)} and cancel order #${order.id}?`
+      )
+    ) {
+      return;
+    }
+
+    setUpdatingId(`refund-${order.id}`);
+    try {
+      const response = await api.post(`/admin/orders/${order.id}/refund`);
+      toast.success(response.data.message);
+      await refresh();
+    } catch (error) {
+      toast.error(error.response?.data?.message || "Could not refund payment");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const syncRefund = async (order) => {
+    setUpdatingId(`refund-${order.id}`);
+    try {
+      const response = await api.post(
+        `/admin/orders/${order.id}/refund/sync`
+      );
+      toast.success(response.data.message);
+      await refresh();
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || "Could not refresh refund status"
+      );
     } finally {
       setUpdatingId(null);
     }
@@ -1004,7 +1045,7 @@ export default function AdminDashboard() {
               (filteredOrders.length ? (
                 <div className="overflow-hidden border border-gray-300 bg-white">
                   <div className="hidden overflow-x-auto md:block">
-                    <table className="w-full min-w-[900px] text-left text-sm">
+                    <table className="w-full min-w-[1020px] text-left text-sm">
                       <thead className="border-b border-gray-200 bg-gray-50 text-xs uppercase text-gray-500">
                         <tr>
                           <th className="px-4 py-3 font-semibold">Order</th>
@@ -1012,6 +1053,9 @@ export default function AdminDashboard() {
                           <th className="px-4 py-3 font-semibold">Payment</th>
                           <th className="px-4 py-3 font-semibold">Total</th>
                           <th className="px-4 py-3 font-semibold">Status</th>
+                          <th className="px-4 py-3 text-right font-semibold">
+                            Actions
+                          </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
@@ -1063,6 +1107,58 @@ export default function AdminDashboard() {
                                 ))}
                               </select>
                             </td>
+                            <td className="px-4 py-3">
+                              <div className="flex justify-end">
+                                {order.payment_method === "Razorpay" &&
+                                  order.payment_status === "Paid" &&
+                                  (!order.refund_status ||
+                                    order.refund_status === "Failed") && (
+                                    <button
+                                      type="button"
+                                      onClick={() => refundOrder(order)}
+                                      disabled={
+                                        updatingId === `refund-${order.id}`
+                                      }
+                                      className="flex h-9 items-center gap-2 border border-red-200 px-3 text-xs font-bold text-red-700 hover:bg-red-50 disabled:text-gray-400"
+                                    >
+                                      {updatingId === `refund-${order.id}` ? (
+                                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                                      ) : (
+                                        <RotateCcw className="h-4 w-4" />
+                                      )}
+                                      Refund & cancel
+                                    </button>
+                                  )}
+                                {(order.payment_status === "RefundPending" ||
+                                  (order.payment_status === "Paid" &&
+                                    ["Pending", "Processed"].includes(
+                                      order.refund_status
+                                    ))) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => syncRefund(order)}
+                                    disabled={
+                                      updatingId === `refund-${order.id}`
+                                    }
+                                    className="flex h-9 items-center gap-2 border border-amber-200 px-3 text-xs font-bold text-amber-800 hover:bg-amber-50 disabled:text-gray-400"
+                                  >
+                                    <RefreshCw
+                                      className={`h-4 w-4 ${
+                                        updatingId === `refund-${order.id}`
+                                          ? "animate-spin"
+                                          : ""
+                                      }`}
+                                    />
+                                    Check refund
+                                  </button>
+                                )}
+                                {order.payment_status === "Refunded" && (
+                                  <span className="text-xs font-semibold text-cyan-800">
+                                    {order.razorpay_refund_id || "Refunded"}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1091,7 +1187,7 @@ export default function AdminDashboard() {
                             {order.email}
                           </p>
                         </div>
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
                           <div className="flex items-center gap-2">
                             <span className="text-xs text-gray-500">
                               {order.payment_method}
@@ -1124,6 +1220,45 @@ export default function AdminDashboard() {
                             ))}
                           </select>
                         </div>
+                        {order.payment_method === "Razorpay" &&
+                          order.payment_status === "Paid" &&
+                          (!order.refund_status ||
+                            order.refund_status === "Failed") && (
+                            <button
+                              type="button"
+                              onClick={() => refundOrder(order)}
+                              disabled={updatingId === `refund-${order.id}`}
+                              className="flex h-10 w-full items-center justify-center gap-2 border border-red-200 text-sm font-bold text-red-700 hover:bg-red-50 disabled:text-gray-400"
+                            >
+                              {updatingId === `refund-${order.id}` ? (
+                                <LoaderCircle className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <RotateCcw className="h-4 w-4" />
+                              )}
+                              Refund payment and cancel
+                            </button>
+                          )}
+                        {(order.payment_status === "RefundPending" ||
+                          (order.payment_status === "Paid" &&
+                            ["Pending", "Processed"].includes(
+                              order.refund_status
+                            ))) && (
+                          <button
+                            type="button"
+                            onClick={() => syncRefund(order)}
+                            disabled={updatingId === `refund-${order.id}`}
+                            className="flex h-10 w-full items-center justify-center gap-2 border border-amber-200 text-sm font-bold text-amber-800 hover:bg-amber-50 disabled:text-gray-400"
+                          >
+                            <RefreshCw
+                              className={`h-4 w-4 ${
+                                updatingId === `refund-${order.id}`
+                                  ? "animate-spin"
+                                  : ""
+                              }`}
+                            />
+                            Check refund status
+                          </button>
+                        )}
                       </article>
                     ))}
                   </div>

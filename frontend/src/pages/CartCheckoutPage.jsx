@@ -1,4 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowLeft,
+  Banknote,
+  Check,
+  CreditCard,
+  LoaderCircle,
+  MapPin,
+  Minus,
+  Package,
+  Plus,
+  ShieldCheck,
+  ShoppingCart,
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import toast, { Toaster } from "react-hot-toast";
 import api from "../api/axios";
@@ -10,53 +23,133 @@ const formatCurrency = new Intl.NumberFormat("en-IN", {
   currency: "INR",
 });
 
+function CheckoutSkeleton() {
+  return (
+    <div className="grid animate-pulse gap-8 lg:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="space-y-8">
+        <div>
+          <div className="h-6 w-44 bg-gray-200" />
+          <div className="mt-4 h-24 w-full bg-gray-200" />
+        </div>
+        <div>
+          <div className="h-6 w-40 bg-gray-200" />
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="h-28 bg-gray-200" />
+            <div className="h-28 bg-gray-200" />
+          </div>
+        </div>
+      </div>
+      <div className="h-96 border border-gray-200 bg-white p-5">
+        <div className="h-6 w-36 bg-gray-200" />
+        <div className="mt-5 h-20 w-full bg-gray-200" />
+        <div className="mt-4 h-20 w-full bg-gray-200" />
+        <div className="mt-6 h-11 w-full bg-gray-200" />
+      </div>
+    </div>
+  );
+}
+
 export default function CartCheckoutPage() {
   const [addresses, setAddresses] = useState([]);
   const [selectedAddressId, setSelectedAddressId] = useState(null);
   const [paymentMethod, setPaymentMethod] = useState("COD");
   const [cartItems, setCartItems] = useState([]);
+  const [loadingCheckout, setLoadingCheckout] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [placingOrder, setPlacingOrder] = useState(false);
+  const [updatingItems, setUpdatingItems] = useState(new Set());
   const navigate = useNavigate();
 
-  useEffect(() => {
-    async function loadCheckout() {
-      try {
-        const [addressResponse, cartResponse] = await Promise.all([
-          api.get("/addresses"),
-          api.get("/cart"),
-        ]);
-        const savedAddresses = addressResponse.data.addresses || [];
-        setAddresses(savedAddresses);
-        setSelectedAddressId(savedAddresses[0]?.id || null);
-        setCartItems(cartResponse.data.items || []);
-      } catch (error) {
-        console.error("Failed to load checkout", error);
-        toast.error("Could not load your checkout.");
-      }
-    }
+  const loadCheckout = async () => {
+    setLoadingCheckout(true);
+    setLoadError("");
 
+    try {
+      const [addressResponse, cartResponse] = await Promise.all([
+        api.get("/addresses"),
+        api.get("/cart"),
+      ]);
+      const savedAddresses = addressResponse.data.addresses || [];
+      setAddresses(savedAddresses);
+      setSelectedAddressId(savedAddresses[0]?.id || null);
+      setCartItems(cartResponse.data.items || []);
+    } catch (error) {
+      console.error("Failed to load checkout", error);
+      setLoadError("We could not load your checkout right now.");
+    } finally {
+      setLoadingCheckout(false);
+    }
+  };
+
+  useEffect(() => {
     loadCheckout();
   }, []);
 
-  const calculateTotal = () =>
-    cartItems.reduce(
-      (sum, item) => sum + Number(item.price) * item.quantity,
-      0
-    );
+  const total = useMemo(
+    () =>
+      cartItems.reduce(
+        (sum, item) => sum + Number(item.price) * item.quantity,
+        0
+      ),
+    [cartItems]
+  );
 
-  const updateQuantity = (index, nextQuantity) => {
+  const itemCount = useMemo(
+    () =>
+      cartItems.reduce((sum, item) => sum + Number(item.quantity || 0), 0),
+    [cartItems]
+  );
+
+  const updateQuantity = async (cartItemId, nextQuantity) => {
+    const item = cartItems.find(
+      (cartItem) => cartItem.cart_item_id === cartItemId
+    );
+    if (!item) return;
+
+    const maximum = Math.max(1, Math.min(Number(item.stock) || 20, 20));
+    const quantity = Math.min(Math.max(nextQuantity, 1), maximum);
+    if (quantity === item.quantity) return;
+
+    const previousQuantity = item.quantity;
     setCartItems((current) =>
-      current.map((item, itemIndex) =>
-        itemIndex === index
-          ? { ...item, quantity: Math.max(1, nextQuantity) }
-          : item
+      current.map((cartItem) =>
+        cartItem.cart_item_id === cartItemId
+          ? { ...cartItem, quantity }
+          : cartItem
       )
     );
+    setUpdatingItems((current) => new Set(current).add(cartItemId));
+
+    try {
+      await api.patch(`/cart/${cartItemId}`, { quantity });
+    } catch (error) {
+      setCartItems((current) =>
+        current.map((cartItem) =>
+          cartItem.cart_item_id === cartItemId
+            ? { ...cartItem, quantity: previousQuantity }
+            : cartItem
+        )
+      );
+      toast.error(
+        error.response?.data?.error || "Could not update the quantity"
+      );
+    } finally {
+      setUpdatingItems((current) => {
+        const next = new Set(current);
+        next.delete(cartItemId);
+        return next;
+      });
+    }
   };
 
   const handlePlaceOrder = async () => {
     if (!selectedAddressId || cartItems.length === 0) {
       toast.error("Select an address and make sure your cart is not empty.");
+      return;
+    }
+
+    if (updatingItems.size > 0) {
+      toast("Wait for quantity changes to finish saving.");
       return;
     }
 
@@ -86,7 +179,6 @@ export default function CartCheckoutPage() {
         items,
       });
       const paymentOrder = createResponse.data;
-
       let checkoutResponse;
 
       try {
@@ -95,10 +187,13 @@ export default function CartCheckoutPage() {
           amount: paymentOrder.amount,
           currency: paymentOrder.currency,
           name: "Shopzi",
-          description: "Cart checkout",
+          description: `${itemCount} cart item${itemCount === 1 ? "" : "s"}`,
           order_id: paymentOrder.razorpay_order_id,
           prefill: paymentOrder.prefill,
-          theme: { color: "#16a34a" },
+          notes: {
+            shopzi_order_id: String(paymentOrder.shopzi_order_id),
+          },
+          theme: { color: "#eab308" },
         });
       } catch (error) {
         try {
@@ -138,137 +233,349 @@ export default function CartCheckoutPage() {
     }
   };
 
+  const isRazorpay = paymentMethod === "Razorpay";
+  const controlsDisabled = placingOrder || updatingItems.size > 0;
+
   return (
-    <>
+    <div className="min-h-screen bg-gray-100">
       <Toaster
         position="top-center"
-        toastOptions={{ style: { marginTop: "100px" } }}
+        toastOptions={{ style: { marginTop: "88px" } }}
       />
       <Header />
-      <main className="mx-auto max-w-4xl p-6">
-        <h1 className="mb-6 text-2xl font-semibold">Checkout your cart</h1>
 
-        <section className="mb-8">
-          <h2 className="mb-3 text-lg font-semibold">Delivery address</h2>
-          <div className="space-y-2">
-            {addresses.map((address) => (
-              <label
-                key={address.id}
-                className={`block cursor-pointer border p-3 ${
-                  selectedAddressId === address.id
-                    ? "border-blue-600 bg-blue-50"
-                    : "border-gray-300"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="address"
-                  value={address.id}
-                  checked={selectedAddressId === address.id}
-                  onChange={() => setSelectedAddressId(address.id)}
-                  className="mr-2"
-                />
-                {address.name}, {address.street}, {address.city}, {address.state} -{" "}
-                {address.pincode}
-              </label>
-            ))}
-          </div>
-          {addresses.length === 0 && <p>No addresses saved.</p>}
-        </section>
-
-        <section className="mb-8">
-          <h2 className="mb-3 text-lg font-semibold">Payment method</h2>
-          <label className="mb-2 block">
-            <input
-              type="radio"
-              name="payment"
-              value="COD"
-              checked={paymentMethod === "COD"}
-              onChange={() => setPaymentMethod("COD")}
-              className="mr-2"
-            />
-            Cash on Delivery
-          </label>
-          <label className="block">
-            <input
-              type="radio"
-              name="payment"
-              value="Razorpay"
-              checked={paymentMethod === "Razorpay"}
-              onChange={() => setPaymentMethod("Razorpay")}
-              className="mr-2"
-            />
-            Pay Online with Razorpay (Test Mode)
-          </label>
-        </section>
-
-        <section className="mb-6">
-          <h2 className="mb-3 text-lg font-semibold">Order summary</h2>
-          {cartItems.map((item, index) => (
-            <div
-              key={item.cart_item_id}
-              className="flex items-center justify-between border-b py-3"
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="truncate">{item.name}</span>
-                <div className="flex h-8 items-center border border-gray-300">
-                  <button
-                    type="button"
-                    aria-label={`Decrease ${item.name} quantity`}
-                    onClick={() => updateQuantity(index, item.quantity - 1)}
-                    className="h-full w-8 hover:bg-gray-100"
-                  >
-                    -
-                  </button>
-                  <input
-                    type="number"
-                    min="1"
-                    value={item.quantity}
-                    onChange={(event) =>
-                      updateQuantity(
-                        index,
-                        Number.parseInt(event.target.value, 10) || 1
-                      )
-                    }
-                    className="h-full w-12 border-x border-gray-300 text-center outline-none"
-                  />
-                  <button
-                    type="button"
-                    aria-label={`Increase ${item.name} quantity`}
-                    onClick={() => updateQuantity(index, item.quantity + 1)}
-                    className="h-full w-8 hover:bg-gray-100"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-              <span>
-                {formatCurrency.format(Number(item.price) * item.quantity)}
-              </span>
-            </div>
-          ))}
-
-          <div className="mt-4 flex justify-between font-semibold">
-            <span>Total</span>
-            <span>{formatCurrency.format(calculateTotal())}</span>
-          </div>
-        </section>
-
+      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
         <button
           type="button"
-          disabled={
-            placingOrder || !selectedAddressId || cartItems.length === 0
-          }
-          onClick={handlePlaceOrder}
-          className="w-full bg-green-600 px-4 py-3 font-semibold text-white hover:bg-green-700 disabled:bg-gray-400"
+          onClick={() => navigate("/cart")}
+          className="mb-5 flex items-center gap-2 text-sm font-semibold text-gray-600 hover:text-blue-700"
         >
-          {placingOrder
-            ? "Processing..."
-            : paymentMethod === "Razorpay"
-              ? "Pay securely"
-              : "Place COD order"}
+          <ArrowLeft className="h-4 w-4" />
+          Back to cart
         </button>
+
+        <div className="mb-7">
+          <p className="text-sm font-semibold text-blue-700">Secure checkout</p>
+          <h1 className="mt-1 text-2xl font-bold text-gray-950">
+            Checkout your cart
+          </h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Confirm delivery, payment and quantities before placing the order.
+          </p>
+        </div>
+
+        {loadingCheckout ? (
+          <CheckoutSkeleton />
+        ) : loadError ? (
+          <section className="border border-gray-300 bg-white p-8 text-center">
+            <h2 className="text-xl font-bold text-gray-950">
+              Checkout unavailable
+            </h2>
+            <p className="mt-2 text-sm text-gray-600">{loadError}</p>
+            <button
+              type="button"
+              onClick={loadCheckout}
+              className="mt-5 h-10 bg-blue-600 px-5 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              Try again
+            </button>
+          </section>
+        ) : cartItems.length === 0 ? (
+          <section className="flex min-h-[55vh] flex-col items-center justify-center border border-gray-300 bg-white p-8 text-center">
+            <ShoppingCart className="h-10 w-10 text-gray-400" />
+            <h2 className="mt-4 text-xl font-bold text-gray-950">
+              Your cart is empty
+            </h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Add products before opening checkout.
+            </p>
+            <button
+              type="button"
+              onClick={() => navigate("/dashboard")}
+              className="mt-5 h-10 bg-yellow-400 px-5 text-sm font-bold text-gray-950 hover:bg-yellow-500"
+            >
+              Continue shopping
+            </button>
+          </section>
+        ) : (
+          <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_380px]">
+            <div className="space-y-9">
+              <section>
+                <div className="mb-4 flex items-center gap-2">
+                  <MapPin className="h-5 w-5 text-gray-700" />
+                  <h2 className="text-lg font-bold text-gray-950">
+                    Delivery address
+                  </h2>
+                </div>
+
+                {addresses.length === 0 ? (
+                  <div className="border border-gray-300 bg-white p-4">
+                    <p className="text-sm text-gray-700">
+                      Add a delivery address before placing your order.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => navigate("/manage-address")}
+                      className="mt-3 text-sm font-semibold text-blue-700 hover:underline"
+                    >
+                      Add an address
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {addresses.map((address) => {
+                      const selected = selectedAddressId === address.id;
+
+                      return (
+                        <label
+                          key={address.id}
+                          className={`flex cursor-pointer gap-3 border bg-white p-4 transition ${
+                            selected
+                              ? "border-blue-600 bg-blue-50"
+                              : "border-gray-300 hover:border-gray-500"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="address"
+                            checked={selected}
+                            onChange={() => setSelectedAddressId(address.id)}
+                            className="mt-1 h-4 w-4"
+                          />
+                          <span className="min-w-0 text-sm leading-6 text-gray-800">
+                            <span className="block font-bold text-gray-950">
+                              {address.name}
+                            </span>
+                            {address.street}, {address.city}, {address.state} -{" "}
+                            {address.pincode}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
+              <section>
+                <div className="mb-4 flex items-center gap-2">
+                  <CreditCard className="h-5 w-5 text-gray-700" />
+                  <h2 className="text-lg font-bold text-gray-950">
+                    Payment method
+                  </h2>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label
+                    className={`cursor-pointer border bg-white p-4 transition ${
+                      paymentMethod === "COD"
+                        ? "border-blue-600 bg-blue-50"
+                        : "border-gray-300 hover:border-gray-500"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="radio"
+                        name="payment"
+                        checked={paymentMethod === "COD"}
+                        onChange={() => setPaymentMethod("COD")}
+                        className="mt-1 h-4 w-4"
+                      />
+                      <Banknote className="h-5 w-5 text-gray-700" />
+                      <span>
+                        <span className="block text-sm font-bold text-gray-950">
+                          Cash on Delivery
+                        </span>
+                        <span className="mt-1 block text-xs leading-5 text-gray-600">
+                          Pay when your order arrives.
+                        </span>
+                      </span>
+                    </div>
+                  </label>
+
+                  <label
+                    className={`cursor-pointer border bg-white p-4 transition ${
+                      isRazorpay
+                        ? "border-blue-600 bg-blue-50"
+                        : "border-gray-300 hover:border-gray-500"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="radio"
+                        name="payment"
+                        checked={isRazorpay}
+                        onChange={() => setPaymentMethod("Razorpay")}
+                        className="mt-1 h-4 w-4"
+                      />
+                      <CreditCard className="h-5 w-5 text-gray-700" />
+                      <span>
+                        <span className="block text-sm font-bold text-gray-950">
+                          Pay Online with Razorpay
+                        </span>
+                        <span className="mt-1 block text-xs leading-5 text-gray-600">
+                          UPI, cards, netbanking and wallets.
+                        </span>
+                      </span>
+                    </div>
+                  </label>
+                </div>
+
+                {isRazorpay && (
+                  <div className="mt-3 flex items-center gap-2 border-l-4 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                    <ShieldCheck className="h-5 w-5 shrink-0" />
+                    Test Mode is enabled. No real money will be charged.
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <aside className="border border-gray-300 bg-white p-5 lg:sticky lg:top-24">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-gray-950">
+                  Order summary
+                </h2>
+                <span className="text-xs font-semibold text-gray-500">
+                  {itemCount} {itemCount === 1 ? "item" : "items"}
+                </span>
+              </div>
+
+              <div className="mt-4 max-h-[390px] divide-y divide-gray-200 overflow-y-auto pr-1">
+                {cartItems.map((item) => {
+                  const maximum = Math.max(
+                    1,
+                    Math.min(Number(item.stock) || 20, 20)
+                  );
+                  const updating = updatingItems.has(item.cart_item_id);
+
+                  return (
+                    <div key={item.cart_item_id} className="py-4 first:pt-0">
+                      <div className="flex gap-3">
+                        <div className="h-16 w-16 shrink-0 border border-gray-200 bg-gray-50">
+                          {item.image_url ? (
+                            <img
+                              src={item.image_url}
+                              alt={item.name}
+                              className="h-full w-full object-contain p-1"
+                            />
+                          ) : (
+                            <span className="grid h-full w-full place-items-center text-gray-400">
+                              <Package className="h-6 w-6" />
+                            </span>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold leading-5 text-gray-950">
+                            {item.name}
+                          </p>
+                          <p className="mt-1 text-sm text-gray-600">
+                            {formatCurrency.format(Number(item.price))}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex items-center justify-between">
+                        <div className="flex h-8 items-center border border-gray-300">
+                          <button
+                            type="button"
+                            aria-label={`Decrease ${item.name} quantity`}
+                            disabled={
+                              controlsDisabled || updating || item.quantity <= 1
+                            }
+                            onClick={() =>
+                              updateQuantity(
+                                item.cart_item_id,
+                                item.quantity - 1
+                              )
+                            }
+                            className="grid h-full w-8 place-items-center hover:bg-gray-100 disabled:opacity-40"
+                          >
+                            <Minus className="h-3.5 w-3.5" />
+                          </button>
+                          <span className="grid h-full min-w-10 place-items-center border-x border-gray-300 px-2 text-sm font-semibold">
+                            {updating ? (
+                              <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              item.quantity
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            aria-label={`Increase ${item.name} quantity`}
+                            disabled={
+                              controlsDisabled ||
+                              updating ||
+                              item.quantity >= maximum
+                            }
+                            onClick={() =>
+                              updateQuantity(
+                                item.cart_item_id,
+                                item.quantity + 1
+                              )
+                            }
+                            className="grid h-full w-8 place-items-center hover:bg-gray-100 disabled:opacity-40"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <p className="text-sm font-bold text-gray-950">
+                          {formatCurrency.format(
+                            Number(item.price) * item.quantity
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="space-y-3 border-t border-gray-200 pt-5 text-sm">
+                <div className="flex justify-between text-gray-600">
+                  <span>Subtotal</span>
+                  <span>{formatCurrency.format(total)}</span>
+                </div>
+                <div className="flex justify-between text-gray-600">
+                  <span>Delivery</span>
+                  <span className="font-semibold text-emerald-700">Free</span>
+                </div>
+                <div className="flex justify-between border-t border-gray-200 pt-4 text-base font-bold text-gray-950">
+                  <span>Total</span>
+                  <span>{formatCurrency.format(total)}</span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={
+                  controlsDisabled ||
+                  addresses.length === 0 ||
+                  !selectedAddressId
+                }
+                onClick={handlePlaceOrder}
+                className="mt-5 flex h-11 w-full items-center justify-center gap-2 bg-blue-600 px-4 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-400"
+              >
+                {placingOrder ? (
+                  <>
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    Processing
+                  </>
+                ) : (
+                  <>
+                    <Check className="h-4 w-4" />
+                    {isRazorpay
+                      ? `Pay ${formatCurrency.format(total)}`
+                      : "Place COD order"}
+                  </>
+                )}
+              </button>
+
+              <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-xs leading-5 text-gray-500">
+                <ShieldCheck className="h-4 w-4 shrink-0" />
+                Prices, stock and payment are verified securely.
+              </p>
+            </aside>
+          </div>
+        )}
       </main>
-    </>
+    </div>
   );
 }

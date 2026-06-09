@@ -7,6 +7,7 @@ USE shopzi;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS password_reset_tokens;
+DROP TABLE IF EXISTS refunds;
 DROP TABLE IF EXISTS payments;
 DROP TABLE IF EXISTS order_items;
 DROP TABLE IF EXISTS orders;
@@ -116,7 +117,7 @@ CREATE TABLE orders (
   address_id INT NOT NULL,
   total_amount DECIMAL(10, 2) NOT NULL,
   payment_method VARCHAR(50) NOT NULL,
-  payment_status ENUM('Pending', 'Paid', 'Failed', 'Refunded') NOT NULL DEFAULT 'Pending',
+  payment_status ENUM('Pending', 'Paid', 'Failed', 'RefundPending', 'Refunded') NOT NULL DEFAULT 'Pending',
   status VARCHAR(50) NOT NULL DEFAULT 'Placed',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -165,7 +166,7 @@ CREATE TABLE payments (
   razorpay_payment_id VARCHAR(100),
   amount DECIMAL(10, 2) NOT NULL,
   currency CHAR(3) NOT NULL DEFAULT 'INR',
-  status ENUM('Created', 'Paid', 'Failed', 'Refunded') NOT NULL DEFAULT 'Created',
+  status ENUM('Created', 'Paid', 'Failed', 'RefundPending', 'Refunded') NOT NULL DEFAULT 'Created',
   payment_method VARCHAR(50),
   failure_reason VARCHAR(255),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -180,6 +181,32 @@ CREATE TABLE payments (
     FOREIGN KEY (order_id) REFERENCES orders(id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT chk_payments_amount CHECK (amount >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE refunds (
+  id INT AUTO_INCREMENT,
+  order_id INT NOT NULL,
+  payment_id INT NOT NULL,
+  razorpay_refund_id VARCHAR(100),
+  amount DECIMAL(10, 2) NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'INR',
+  status ENUM('Initiated', 'Pending', 'Processed', 'Failed') NOT NULL DEFAULT 'Initiated',
+  failure_reason VARCHAR(255),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_refunds_order (order_id),
+  UNIQUE KEY uq_refunds_razorpay_refund (razorpay_refund_id),
+  KEY idx_refunds_payment (payment_id),
+  KEY idx_refunds_status (status),
+  CONSTRAINT fk_refunds_order
+    FOREIGN KEY (order_id) REFERENCES orders(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_refunds_payment
+    FOREIGN KEY (payment_id) REFERENCES payments(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT chk_refunds_amount CHECK (amount > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE password_reset_tokens (
@@ -233,7 +260,7 @@ INSERT INTO orders
   (id, user_id, address_id, total_amount, payment_method, payment_status, status)
 VALUES
 (1, 1, 1, 3298.00, 'COD', 'Pending', 'Placed'),
-(2, 2, 3, 1798.00, 'Razorpay', 'Paid', 'Delivered');
+(2, 2, 3, 1798.00, 'Razorpay', 'Refunded', 'Cancelled');
 
 INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES
 (1, 1, 1, 1, 799.00),
@@ -243,7 +270,12 @@ INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES
 INSERT INTO payments
   (id, order_id, razorpay_order_id, razorpay_payment_id, amount, currency, status, payment_method)
 VALUES
-(1, 2, 'order_sample_shopzi_2', 'pay_sample_shopzi_2', 1798.00, 'INR', 'Paid', 'card');
+(1, 2, 'order_sample_shopzi_2', 'pay_sample_shopzi_2', 1798.00, 'INR', 'Refunded', 'card');
+
+INSERT INTO refunds
+  (id, order_id, payment_id, razorpay_refund_id, amount, currency, status)
+VALUES
+(1, 2, 1, 'rfnd_sample_shopzi_2', 1798.00, 'INR', 'Processed');
 
 INSERT INTO password_reset_tokens (id, user_id, token) VALUES
 (1, 1, 'sample-reset-token-riya');

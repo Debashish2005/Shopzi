@@ -69,6 +69,7 @@ export default function CartPage() {
   const [cartItems, setCartItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [updatingItems, setUpdatingItems] = useState(new Set());
   const navigate = useNavigate();
 
   const fetchCart = async () => {
@@ -90,7 +91,13 @@ export default function CartPage() {
     fetchCart();
   }, []);
 
-  const handleQuantityChange = (cartItemId, newQuantity) => {
+  const handleQuantityChange = async (cartItemId, newQuantity) => {
+    const currentItem = cartItems.find(
+      (item) => item.cart_item_id === cartItemId
+    );
+    if (!currentItem || newQuantity === currentItem.quantity) return;
+
+    const previousQuantity = currentItem.quantity;
     setCartItems((currentItems) =>
       currentItems.map((item) =>
         item.cart_item_id === cartItemId
@@ -98,6 +105,28 @@ export default function CartPage() {
           : item
       )
     );
+    setUpdatingItems((current) => new Set(current).add(cartItemId));
+
+    try {
+      await api.patch(`/cart/${cartItemId}`, { quantity: newQuantity });
+    } catch (error) {
+      setCartItems((currentItems) =>
+        currentItems.map((item) =>
+          item.cart_item_id === cartItemId
+            ? { ...item, quantity: previousQuantity }
+            : item
+        )
+      );
+      toast.error(
+        error.response?.data?.error || "Could not update the quantity"
+      );
+    } finally {
+      setUpdatingItems((current) => {
+        const next = new Set(current);
+        next.delete(cartItemId);
+        return next;
+      });
+    }
   };
 
   const calculateSubtotal = (item) => Number(item.price) * item.quantity;
@@ -249,21 +278,28 @@ export default function CartPage() {
                         <select
                           id={`qty-${item.cart_item_id}`}
                           value={item.quantity}
+                          disabled={updatingItems.has(item.cart_item_id)}
                           onChange={(event) =>
                             handleQuantityChange(
                               item.cart_item_id,
                               Number(event.target.value)
                             )
                           }
-                          className="h-9 border border-gray-300 bg-white px-3 text-sm font-semibold outline-none focus:border-blue-600"
+                          className="h-9 border border-gray-300 bg-white px-3 text-sm font-semibold outline-none focus:border-blue-600 disabled:bg-gray-100"
                         >
-                          {Array.from({ length: 10 }, (_, index) => index + 1).map(
-                            (quantity) => (
+                          {Array.from(
+                            {
+                              length: Math.max(
+                                1,
+                                Math.min(Number(item.stock) || 20, 20)
+                              ),
+                            },
+                            (_, index) => index + 1
+                          ).map((quantity) => (
                               <option key={quantity} value={quantity}>
                                 {quantity}
                               </option>
-                            )
-                          )}
+                            ))}
                         </select>
                         <button
                           type="button"

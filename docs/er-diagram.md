@@ -12,6 +12,8 @@ erDiagram
     ADDRESSES ||--o{ ORDERS : used_for
     ORDERS ||--|{ ORDER_ITEMS : contains
     ORDERS ||--o| PAYMENTS : paid_through
+    ORDERS ||--o| REFUNDS : may_create
+    PAYMENTS ||--o| REFUNDS : reversed_by
 
     USERS {
         INT id PK
@@ -100,6 +102,19 @@ erDiagram
         TIMESTAMP updated_at
     }
 
+    REFUNDS {
+        INT id PK
+        INT order_id FK,UK
+        INT payment_id FK
+        VARCHAR razorpay_refund_id UK
+        DECIMAL amount
+        CHAR currency
+        ENUM status
+        VARCHAR failure_reason
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+
     PASSWORD_RESET_TOKENS {
         INT id PK
         INT user_id FK
@@ -115,5 +130,6 @@ erDiagram
 - One order belongs to one user and one delivery address.
 - One order contains one or more order item rows.
 - One online order has at most one Shopzi payment record.
+- One paid online order can have at most one full-refund record.
 - `order_items.price` stores the product price at purchase time so old orders keep their original price even if the product price later changes.
 - `products.is_active` supports soft deletion: archived products disappear from the storefront while existing order-item foreign keys remain valid.

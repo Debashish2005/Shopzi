@@ -819,10 +819,14 @@ app.get("/admin/orders", auth, requireAdmin, async (req, res) => {
          u.email,
          a.city,
          a.state,
+         r.razorpay_refund_id,
+         r.status AS refund_status,
+         r.failure_reason AS refund_failure_reason,
          COALESCE(items.item_count, 0) AS item_count
        FROM orders o
        JOIN users u ON u.id = o.user_id
        JOIN addresses a ON a.id = o.address_id
+       LEFT JOIN refunds r ON r.order_id = o.id
        LEFT JOIN (
          SELECT order_id, SUM(quantity) AS item_count
          FROM order_items
@@ -934,6 +938,320 @@ app.patch("/admin/orders/:id/status", auth, requireAdmin, async (req, res) => {
     connection.release();
   }
 });
+
+app.post("/admin/orders/:id/refund", auth, requireAdmin, async (req, res) => {
+  const orderId = Number(req.params.id);
+
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    return res.status(400).json({ message: "Invalid order ID." });
+  }
+
+  const setupConnection = await db.getConnection();
+  let paymentRecord;
+
+  try {
+    await setupConnection.beginTransaction();
+    const [[record]] = await setupConnection.query(
+      `SELECT
+         o.id AS order_id,
+         o.payment_method,
+         o.payment_status,
+         p.id AS payment_id,
+         p.razorpay_payment_id,
+         p.amount,
+         p.currency,
+         p.status AS payment_record_status,
+         r.id AS refund_id,
+         r.status AS refund_status
+       FROM orders o
+       JOIN payments p ON p.order_id = o.id
+       LEFT JOIN refunds r ON r.order_id = o.id
+       WHERE o.id = ?
+       FOR UPDATE`,
+      [orderId]
+    );
+
+    if (!record) {
+      const error = new Error("Paid Razorpay order not found.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (
+      record.payment_method !== "Razorpay" ||
+      record.payment_status !== "Paid" ||
+      record.payment_record_status !== "Paid" ||
+      !record.razorpay_payment_id
+    ) {
+      const error = new Error(
+        "Only captured, paid Razorpay orders can be refunded."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (
+      record.refund_status &&
+      ["Initiated", "Pending", "Processed"].includes(record.refund_status)
+    ) {
+      const error = new Error(
+        record.refund_status === "Processed"
+          ? "This order has already been refunded."
+          : "A refund is already being processed for this order."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (record.refund_id) {
+      await setupConnection.query(
+        `UPDATE refunds
+         SET status = 'Initiated',
+             razorpay_refund_id = NULL,
+             failure_reason = NULL
+         WHERE id = ?`,
+        [record.refund_id]
+      );
+    } else {
+      await setupConnection.query(
+        `INSERT INTO refunds
+           (order_id, payment_id, amount, currency, status)
+         VALUES (?, ?, ?, ?, 'Initiated')`,
+        [
+          orderId,
+          record.payment_id,
+          record.amount,
+          record.currency || "INR",
+        ]
+      );
+    }
+
+    await setupConnection.commit();
+    paymentRecord = record;
+  } catch (error) {
+    await setupConnection.rollback();
+    return res
+      .status(error.statusCode || 500)
+      .json({ message: error.message || "Could not start the refund." });
+  } finally {
+    setupConnection.release();
+  }
+
+  try {
+    const razorpayClient = requireRazorpay();
+    const razorpayPayment = await razorpayClient.payments.fetch(
+      paymentRecord.razorpay_payment_id
+    );
+    const refundAmountPaise = Math.round(Number(paymentRecord.amount) * 100);
+
+    if (
+      razorpayPayment.status !== "captured" ||
+      Number(razorpayPayment.amount) !== refundAmountPaise ||
+      razorpayPayment.currency !== (paymentRecord.currency || "INR")
+    ) {
+      const error = new Error(
+        "Razorpay could not confirm the captured payment amount."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const razorpayRefund = await razorpayClient.payments.refund(
+      paymentRecord.razorpay_payment_id,
+      {
+        amount: refundAmountPaise,
+        speed: "normal",
+        receipt: `shopzi_refund_${orderId}`.slice(0, 40),
+        notes: {
+          shopzi_order_id: String(orderId),
+          initiated_by: String(req.user.id),
+        },
+      }
+    );
+
+    const isProcessed = razorpayRefund.status === "processed";
+    const isPending = razorpayRefund.status === "pending";
+
+    if (!isProcessed && !isPending) {
+      const error = new Error("Razorpay did not accept the refund.");
+      error.statusCode = 502;
+      throw error;
+    }
+
+    await db.query(
+      `UPDATE refunds
+       SET razorpay_refund_id = ?,
+           status = ?,
+           failure_reason = NULL
+       WHERE order_id = ?`,
+      [
+        razorpayRefund.id,
+        isProcessed ? "Processed" : "Pending",
+        orderId,
+      ]
+    );
+
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [[lockedOrder]] = await connection.query(
+        "SELECT status FROM orders WHERE id = ? FOR UPDATE",
+        [orderId]
+      );
+
+      if (!lockedOrder) {
+        const error = new Error("Order not found while saving the refund.");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (lockedOrder.status !== "Cancelled") {
+        await restoreOrderStock(connection, orderId);
+      }
+
+      await connection.query(
+        "UPDATE payments SET status = ? WHERE order_id = ?",
+        [isProcessed ? "Refunded" : "RefundPending", orderId]
+      );
+      await connection.query(
+        `UPDATE orders
+         SET status = 'Cancelled', payment_status = ?
+         WHERE id = ?`,
+        [isProcessed ? "Refunded" : "RefundPending", orderId]
+      );
+      await connection.commit();
+
+      res.json({
+        message: isProcessed
+          ? "Payment refunded and order cancelled."
+          : "Refund accepted and is being processed.",
+        refund_status: isProcessed ? "Processed" : "Pending",
+        razorpay_refund_id: razorpayRefund.id,
+      });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    const reason =
+      error?.error?.description ||
+      error?.description ||
+      error.message ||
+      "Razorpay refund failed.";
+
+    await db.query(
+      `UPDATE refunds
+       SET status = 'Failed', failure_reason = ?
+       WHERE order_id = ? AND status = 'Initiated'`,
+      [String(reason).slice(0, 255), orderId]
+    );
+
+    console.error("Admin Razorpay refund error:", error);
+    res.status(error.statusCode || 502).json({ message: String(reason) });
+  }
+});
+
+app.post(
+  "/admin/orders/:id/refund/sync",
+  auth,
+  requireAdmin,
+  async (req, res) => {
+    const orderId = Number(req.params.id);
+
+    if (!Number.isInteger(orderId) || orderId <= 0) {
+      return res.status(400).json({ message: "Invalid order ID." });
+    }
+
+    try {
+      const [[record]] = await db.query(
+        `SELECT
+           r.razorpay_refund_id,
+           p.razorpay_payment_id
+         FROM refunds r
+         JOIN payments p ON p.id = r.payment_id
+         WHERE r.order_id = ?
+         LIMIT 1`,
+        [orderId]
+      );
+
+      if (!record?.razorpay_refund_id) {
+        return res.status(404).json({ message: "Refund record not found." });
+      }
+
+      const razorpayClient = requireRazorpay();
+      const razorpayRefund = await razorpayClient.refunds.fetch(
+        record.razorpay_refund_id,
+        { payment_id: record.razorpay_payment_id }
+      );
+
+      if (razorpayRefund.status === "failed") {
+        await db.query(
+          `UPDATE refunds
+           SET status = 'Failed', failure_reason = 'Razorpay refund failed'
+           WHERE order_id = ?`,
+          [orderId]
+        );
+        return res.status(409).json({ message: "The Razorpay refund failed." });
+      }
+
+      const isProcessed = razorpayRefund.status === "processed";
+      const connection = await db.getConnection();
+
+      try {
+        await connection.beginTransaction();
+        const [[order]] = await connection.query(
+          "SELECT status FROM orders WHERE id = ? FOR UPDATE",
+          [orderId]
+        );
+
+        if (!order) {
+          const error = new Error("Order not found.");
+          error.statusCode = 404;
+          throw error;
+        }
+
+        if (order.status !== "Cancelled") {
+          await restoreOrderStock(connection, orderId);
+        }
+
+        await connection.query(
+          `UPDATE refunds
+           SET status = ?, failure_reason = NULL
+           WHERE order_id = ?`,
+          [isProcessed ? "Processed" : "Pending", orderId]
+        );
+        await connection.query(
+          "UPDATE payments SET status = ? WHERE order_id = ?",
+          [isProcessed ? "Refunded" : "RefundPending", orderId]
+        );
+        await connection.query(
+          `UPDATE orders
+           SET status = 'Cancelled', payment_status = ?
+           WHERE id = ?`,
+          [isProcessed ? "Refunded" : "RefundPending", orderId]
+        );
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+
+      res.json({
+        message: isProcessed
+          ? "Refund completed."
+          : "Refund is still being processed.",
+        refund_status: isProcessed ? "Processed" : "Pending",
+      });
+    } catch (error) {
+      console.error("Refund sync error:", error);
+      res.status(502).json({ message: "Could not refresh the refund status." });
+    }
+  }
+);
 
 app.get("/admin/users", auth, requireAdmin, async (req, res) => {
   const search = String(req.query.search || "").trim();
@@ -1172,6 +1490,7 @@ const [items] = await db.query(
      p.id AS product_id,
      p.name,
      p.price,
+     p.stock,
      (
        SELECT image_url 
        FROM product_images 
@@ -1180,7 +1499,7 @@ const [items] = await db.query(
      ) AS image_url
    FROM cart_items ci
    JOIN products p ON ci.product_id = p.id
-   WHERE ci.user_id = ?`,
+   WHERE ci.user_id = ? AND p.is_active = TRUE`,
   [userId]
 );
 
@@ -1193,6 +1512,69 @@ const [items] = await db.query(
   }
 });
 
+
+app.patch('/cart/:cartItemId', auth, async (req, res) => {
+  const userId = req.user.id;
+  const cartItemId = Number(req.params.cartItemId);
+  const quantity = Number(req.body.quantity);
+
+  if (
+    !Number.isInteger(cartItemId) ||
+    cartItemId <= 0 ||
+    !Number.isInteger(quantity) ||
+    quantity <= 0 ||
+    quantity > 20
+  ) {
+    return res.status(400).json({
+      success: false,
+      error: "Quantity must be between 1 and 20.",
+    });
+  }
+
+  try {
+    const [[cartItem]] = await db.query(
+      `SELECT ci.id, p.stock, p.is_active
+       FROM cart_items ci
+       JOIN products p ON p.id = ci.product_id
+       WHERE ci.id = ? AND ci.user_id = ?
+       LIMIT 1`,
+      [cartItemId, userId]
+    );
+
+    if (!cartItem || !cartItem.is_active) {
+      return res.status(404).json({
+        success: false,
+        error: "Cart item is no longer available.",
+      });
+    }
+
+    if (quantity > Number(cartItem.stock)) {
+      return res.status(409).json({
+        success: false,
+        error: `Only ${cartItem.stock} item(s) are available.`,
+      });
+    }
+
+    await db.query(
+      `UPDATE cart_items
+       SET quantity = ?
+       WHERE id = ? AND user_id = ?`,
+      [quantity, cartItemId, userId]
+    );
+
+    res.json({
+      success: true,
+      quantity,
+      message: "Cart quantity updated.",
+    });
+  } catch (error) {
+    console.error("Cart quantity update failed:", error);
+    res.status(500).json({
+      success: false,
+      error: "Could not update cart quantity.",
+    });
+  }
+});
 
 app.delete('/cart/:cartItemId', auth, async (req, res) => {
   const userId = req.user.id;
