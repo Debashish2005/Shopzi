@@ -22,13 +22,6 @@ const {
 } = require("./utils/checkout");
 
 const upload = multer({ storage });
-const razorpay =
-  process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET
-    ? new Razorpay({
-        key_id: process.env.RAZORPAY_KEY_ID,
-        key_secret: process.env.RAZORPAY_KEY_SECRET,
-      })
-    : null;
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -591,13 +584,28 @@ app.delete('/cart/:cartItemId', auth, async (req, res) => {
 });
 
 function requireRazorpay() {
-  if (!razorpay) {
-    const error = new Error("Online payment is not configured on the server.");
+  const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+  const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+  const missingVariables = [];
+
+  if (!keyId) missingVariables.push("RAZORPAY_KEY_ID");
+  if (!keySecret) missingVariables.push("RAZORPAY_KEY_SECRET");
+
+  if (missingVariables.length > 0) {
+    console.error(
+      `Razorpay configuration missing: ${missingVariables.join(", ")}`
+    );
+    const error = new Error(
+      `Online payment configuration is missing: ${missingVariables.join(", ")}.`
+    );
     error.statusCode = 503;
     throw error;
   }
 
-  return razorpay;
+  return new Razorpay({
+    key_id: keyId,
+    key_secret: keySecret,
+  });
 }
 
 function sendCheckoutError(res, error, fallbackMessage) {
@@ -761,7 +769,7 @@ app.post("/payments/create-order", auth, async (req, res) => {
 
     res.status(201).json({
       success: true,
-      key_id: process.env.RAZORPAY_KEY_ID,
+      key_id: process.env.RAZORPAY_KEY_ID.trim(),
       shopzi_order_id: orderId,
       razorpay_order_id: razorpayOrder.id,
       amount: razorpayOrder.amount,
@@ -827,7 +835,7 @@ app.post("/payments/verify", auth, async (req, res) => {
       razorpayOrderId: paymentRecord.razorpay_order_id,
       razorpayPaymentId: razorpay_payment_id,
       razorpaySignature: razorpay_signature,
-      keySecret: process.env.RAZORPAY_KEY_SECRET,
+      keySecret: process.env.RAZORPAY_KEY_SECRET.trim(),
     });
 
     if (!signatureIsValid) {
@@ -1146,6 +1154,10 @@ app.post("/logout", (req, res) => {
 
 
 app.listen(PORT, ()=>{
-    console.log(`Server running on port ${PORT}`)
+    console.log(`Server running on port ${PORT}`);
+    console.log("Razorpay environment:", {
+      keyIdPresent: Boolean(process.env.RAZORPAY_KEY_ID?.trim()),
+      keySecretPresent: Boolean(process.env.RAZORPAY_KEY_SECRET?.trim()),
+    });
 })
 
