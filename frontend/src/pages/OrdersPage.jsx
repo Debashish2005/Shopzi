@@ -60,11 +60,20 @@ export default function OrdersPage() {
   const cancelOrder = (orderId) => {
     showCancelToast(async () => {
       try {
-        await axios.delete(`/orders/${orderId}`, { withCredentials: true });
-        setOrders((prev) => prev.filter((o) => o.id !== orderId));
+        const response = await axios.delete(`/orders/${orderId}`, {
+          withCredentials: true,
+        });
+        setOrders((previousOrders) =>
+          previousOrders.map((order) =>
+            order.id === orderId ? { ...order, status: "Cancelled" } : order
+          )
+        );
+        toast.success(response.data.message || "Order cancelled successfully");
       } catch (err) {
         console.error("Cancel failed", err);
-        toast.error("Failed to cancel order");
+        toast.error(
+          err.response?.data?.message || "Failed to cancel order"
+        );
       }
     });
   };
@@ -88,9 +97,18 @@ export default function OrdersPage() {
                 <div className="flex justify-between items-center mb-2">
                   <div>
                     <p className="text-lg font-medium">Order #{order.id}</p>
-                    <p className="text-sm text-gray-600">
-                      {order.created_at?.slice(0, 10)} | {order.status}
-                    </p>
+                    <div className="flex items-center gap-2 text-sm text-gray-600">
+                      <span>{order.created_at?.slice(0, 10)}</span>
+                      <span
+                        className={`px-2 py-0.5 text-xs font-semibold ${
+                          order.status === "Cancelled"
+                            ? "bg-red-50 text-red-700"
+                            : "bg-green-50 text-green-700"
+                        }`}
+                      >
+                        {order.status}
+                      </span>
+                    </div>
                     <p className="text-sm text-gray-600">
                       {order.payment_method} | Payment: {order.payment_status}
                     </p>
