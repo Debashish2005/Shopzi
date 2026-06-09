@@ -3,7 +3,6 @@ import Header from "../components/header";
 import ProductCard from "../components/ProductCard";
 import Footer from "../components/footer";
 import api from "../api/axios";
-import { Plus } from "lucide-react";
 
 function SkeletonCard() {
   return (
@@ -181,84 +180,7 @@ const dummySections = [
 export default function Dashboard() {
   const [searchResults, setSearchResults] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
-  const [showAddForm, setShowAddForm] = useState(false);
-const [previewUrls, setPreviewUrls] = useState([]);
-const [user, setUser] = useState(null);
 const [isLoading, setIsLoading] = useState(false);
-
-useEffect(() => {
-    const fetchUser = async () => {
-      try {
-        const res = await api.get("/me"); // will include cookie
-        setUser(res.data);
-      } catch (err) {
-        console.error("Failed to fetch user:", err);
-      }
-    };
-
-    fetchUser();
-  }, []);
-
-  const [form, setForm] = useState({
-  name: "",
-  description: "",
-  price: "",
-  original_price: "",
-  category: "",
-  stock: "",
-});
-const [images, setImages] = useState([]);
-const handleChange = (e) => {
-  const { name, value } = e.target;
-  setForm((prev) => ({ ...prev, [name]: value }));
-};
-
-const handleImageChange = (e) => {
-  const files = Array.from(e.target.files);
-  setImages(files);
-
-  const previewList = files.map((file) => URL.createObjectURL(file));
-  setPreviewUrls(previewList);
-};
-
-// On unmount, revoke object URLs to prevent memory leaks
-useEffect(() => {
-  return () => {
-    previewUrls.forEach(url => URL.revokeObjectURL(url));
-  };
-}, [previewUrls]);
-
-
-const handleSubmit = async (e) => {
-  e.preventDefault();
-
-  const data = new FormData();
-  Object.entries(form).forEach(([key, value]) => {
-    data.append(key, value);
-  });
-
-  for (let i = 0; i < images.length; i++) {
-    data.append("images", images[i]);
-  }
-
-  try {
-    await api.post("/add-product", data); // your backend route
-    alert("Product added!");
-    setShowAddForm(false);
-    setForm({
-      name: "",
-      description: "",
-      price: "",
-      original_price: "",
-      category: "",
-      stock: "",
-    });
-    setImages([]);
-  } catch (err) {
-    console.error("Upload error", err);
-    alert(err.response?.data?.message || "Failed to upload product");
-  }
-};
 
 useEffect(() => {
   const delayDebounce = setTimeout(() => {
@@ -288,27 +210,11 @@ useEffect(() => {
   const handleSearch = (term) => {
   setSearchTerm(term);
 };
-  const isAdmin = user?.role === "admin";
 
 
   return (
     <>
       <Header onSearch={handleSearch} />
-
-{isAdmin && (
-
-  <div className="flex justify-end px-4 mt-2">
-    <button
-      onClick={() => setShowAddForm(true)}
-      className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow"
-    >
-      <Plus className="h-4 w-4" />
-      Add Product
-    </button>
-  </div>
-)}
-
-
 
 <main className="p-4 bg-gray-100 min-h-screen">
 {searchTerm ? (
@@ -359,138 +265,6 @@ useEffect(() => {
     </div>
   )}
 </main>
-{showAddForm && isAdmin && (
-  <div className="fixed inset-0 bg-black bg-opacity-40 flex justify-center items-start pt-10 z-50">
-    <div className="bg-white rounded-lg p-6 w-full max-w-xl shadow-lg relative">
-      <button
-        onClick={() => setShowAddForm(false)}
-        className="absolute top-2 right-3 text-gray-500 hover:text-black text-xl font-bold"
-      >
-        ×
-      </button>
-      <h2 className="mb-4 text-xl font-semibold text-gray-900">Add product</h2>
- <form
-  onSubmit={handleSubmit}
-  className="space-y-4"
-  encType="multipart/form-data"
->
-  {/* Name */}
-  <div>
-    <label className="block text-sm font-medium text-gray-700">Name</label>
-    <input
-      type="text"
-      name="name"
-      required
-      value={form.name}
-      onChange={handleChange}
-      className="mt-1 block w-full border border-gray-300 rounded p-2"
-    />
-  </div>
-
-  {/* Description */}
-  <div>
-    <label className="block text-sm font-medium text-gray-700">Description</label>
-    <textarea
-      name="description"
-      required
-      value={form.description}
-      onChange={handleChange}
-      className="mt-1 block w-full border border-gray-300 rounded p-2"
-    />
-  </div>
-
-  {/* Price */}
-  <div className="grid grid-cols-2 gap-4">
-    <div>
-      <label className="block text-sm font-medium text-gray-700">Price</label>
-      <input
-        type="number"
-        name="price"
-        required
-        value={form.price}
-        onChange={handleChange}
-        className="mt-1 block w-full border border-gray-300 rounded p-2"
-      />
-    </div>
-
-    <div>
-      <label className="block text-sm font-medium text-gray-700">Original Price</label>
-      <input
-        type="number"
-        name="original_price"
-        value={form.original_price}
-        onChange={handleChange}
-        className="mt-1 block w-full border border-gray-300 rounded p-2"
-      />
-    </div>
-  </div>
-
-  {/* Category + Stock */}
-  <div className="grid grid-cols-2 gap-4">
-    <div>
-      <label className="block text-sm font-medium text-gray-700">Category</label>
-      <input
-        type="text"
-        name="category"
-        value={form.category}
-        onChange={handleChange}
-        className="mt-1 block w-full border border-gray-300 rounded p-2"
-      />
-    </div>
-
-    <div>
-      <label className="block text-sm font-medium text-gray-700">Stock</label>
-      <input
-        type="number"
-        name="stock"
-        value={form.stock}
-        onChange={handleChange}
-        className="mt-1 block w-full border border-gray-300 rounded p-2"
-      />
-    </div>
-  </div>
-
-  {/* Multiple Images */}
-  <div>
-    <label className="block text-sm font-medium text-gray-700">
-      Product Images (You can select multiple)
-    </label>
-    <input
-      type="file"
-      name="images"
-      multiple
-      accept="image/*"
-      onChange={handleImageChange}
-      className="mt-1 block w-full border border-gray-300 rounded p-2"
-    />
-    {previewUrls.length > 0 && (
-  <div className="grid grid-cols-3 gap-2 mt-2">
-    {previewUrls.map((url, i) => (
-      <img
-        key={i}
-        src={url}
-        alt={`Preview ${i}`}
-        className="w-full h-24 object-cover rounded border"
-      />
-    ))}
-  </div>
-)}
-
-  </div>
-
-  {/* Submit */}
-  <button
-    type="submit"
-    className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded"
-  >
-    Submit
-  </button>
-</form>
-
-    </div>
-  </div>
-)}
-
       <Footer />
     </>
   );
