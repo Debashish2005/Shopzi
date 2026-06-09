@@ -41,7 +41,7 @@ async function loadCheckoutProducts(connection, items, lockRows = false) {
   const [products] = await connection.query(
     `SELECT id, name, price, stock
      FROM products
-     WHERE id IN (${placeholders})${lockClause}`,
+     WHERE id IN (${placeholders}) AND is_active = TRUE${lockClause}`,
     productIds
   );
 

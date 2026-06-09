@@ -60,6 +60,7 @@ CREATE TABLE products (
   is_prime BOOLEAN DEFAULT FALSE,
   category VARCHAR(100),
   stock INT DEFAULT 0,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -67,6 +68,7 @@ CREATE TABLE products (
   KEY idx_products_name (name),
   KEY idx_products_category (category),
   KEY idx_products_created_at (created_at),
+  KEY idx_products_active_stock (is_active, stock),
   CONSTRAINT chk_products_price CHECK (price >= 0),
   CONSTRAINT chk_products_original_price CHECK (original_price IS NULL OR original_price >= 0),
   CONSTRAINT chk_products_rating CHECK (rating >= 0 AND rating <= 5),
@@ -209,12 +211,12 @@ INSERT INTO addresses (id, user_id, name, street, city, state, pincode) VALUES
 (3, 2, 'Arjun Mehta', '17 Park Street', 'Mumbai', 'Maharashtra', '400001');
 
 INSERT INTO products
-  (id, name, description, price, original_price, image_url, rating, reviews, is_prime, category, stock)
+  (id, name, description, price, original_price, image_url, rating, reviews, is_prime, category, stock, is_active)
 VALUES
-(1, 'Smart Plugs', 'Wi-Fi enabled smart plug for home automation.', 799.00, 999.00, '/images/Smart Plugs.webp', 4.3, 128, TRUE, 'Electronics', 40),
-(2, 'Running Shoes', 'Lightweight running shoes with cushioned sole.', 2499.00, 3299.00, '/Running Shoes.webp', 4.5, 214, TRUE, 'Footwear', 25),
-(3, 'Samsung Galaxy M16', '5G smartphone with AMOLED display and long battery life.', 13999.00, 16999.00, '/images/Samsung Galaxy M16.webp', 4.2, 89, FALSE, 'Mobiles', 18),
-(4, 'Cotton Track Pants', 'Comfortable cotton track pants for everyday wear.', 899.00, 1299.00, '/Cotton Track Pants.webp', 4.1, 64, FALSE, 'Fashion', 55);
+(1, 'Smart Plugs', 'Wi-Fi enabled smart plug for home automation.', 799.00, 999.00, '/images/Smart Plugs.webp', 4.3, 128, TRUE, 'Electronics', 40, TRUE),
+(2, 'Running Shoes', 'Lightweight running shoes with cushioned sole.', 2499.00, 3299.00, '/Running Shoes.webp', 4.5, 214, TRUE, 'Footwear', 25, TRUE),
+(3, 'Samsung Galaxy M16', '5G smartphone with AMOLED display and long battery life.', 13999.00, 16999.00, '/images/Samsung Galaxy M16.webp', 4.2, 89, FALSE, 'Mobiles', 18, TRUE),
+(4, 'Cotton Track Pants', 'Comfortable cotton track pants for everyday wear.', 899.00, 1299.00, '/Cotton Track Pants.webp', 4.1, 64, FALSE, 'Fashion', 55, TRUE);
 
 INSERT INTO product_images (id, product_id, image_url) VALUES
 (1, 1, '/images/Smart Plugs.webp'),

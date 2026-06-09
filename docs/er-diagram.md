@@ -46,6 +46,7 @@ erDiagram
         BOOLEAN is_prime
         VARCHAR category
         INT stock
+        BOOLEAN is_active
         TIMESTAMP created_at
         TIMESTAMP updated_at
     }
@@ -115,3 +116,4 @@ erDiagram
 - One order contains one or more order item rows.
 - One online order has at most one Shopzi payment record.
 - `order_items.price` stores the product price at purchase time so old orders keep their original price even if the product price later changes.
+- `products.is_active` supports soft deletion: archived products disappear from the storefront while existing order-item foreign keys remain valid.

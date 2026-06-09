@@ -1,15 +1,14 @@
 import { useState,useEffect } from "react";
 import { Link } from "react-router-dom";
-import { ShoppingCart, Menu } from "lucide-react";
+import { LayoutDashboard, ShoppingCart, Menu, Search } from "lucide-react";
 import { Package } from "lucide-react";
 import api from '../api/axios'; 
-import { useNavigate, useLocation } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 export default function Header({ onSearch }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
    const [user, setUser] = useState(null);
    const navigate = useNavigate();
-const location = useLocation();
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -58,6 +57,8 @@ const handleSearch = (e) => {
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             className="sm:hidden text-white"
+            aria-label="Toggle navigation menu"
+            title="Menu"
           >
             <Menu size={28} />
           </button>
@@ -87,28 +88,17 @@ onChange={(e) => {
     <button
       type="submit"
       className="bg-yellow-400 hover:bg-yellow-500 px-4 flex items-center justify-center"
+      aria-label="Search products"
+      title="Search"
     >
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        className="h-5 w-5 text-black"
-        fill="none"
-        viewBox="0 0 24 24"
-        stroke="currentColor"
-      >
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M21 21l-4.35-4.35m1.08-5.33a7 7 0 11-14 0 7 7 0 0114 0z"
-        />
-      </svg>
+      <Search className="h-5 w-5 text-black" />
     </button>
   </form>
 </div>
 
 
         {/* DESKTOP MENU */}
-        <div className="hidden sm:flex items-center gap-6 shrink-0 w-[260px] justify-end text-sm font-medium">
+        <div className="hidden sm:flex items-center gap-5 shrink-0 justify-end text-sm font-medium">
  <div className="flex flex-col text-right">
   <span className="text-gray-300 truncate max-w-[110px]">
     Hello, {user?.full_name?.split(" ")[0] || "Guest"}
@@ -116,7 +106,17 @@ onChange={(e) => {
   <Link to="/profile" className="text-white hover:underline">
     Account & Lists
   </Link>
-</div>
+ </div>
+
+          {user?.role === "admin" && (
+            <Link
+              to="/admin"
+              className="flex items-center gap-1 text-white hover:underline"
+            >
+              <LayoutDashboard className="h-5 w-5" />
+              <span>Admin</span>
+            </Link>
+          )}
 
  <div className="flex items-center gap-1 text-white">
       <Package className="w-5 h-5 text-white" />
@@ -140,11 +140,21 @@ onChange={(e) => {
       {mobileMenuOpen && (
         <div className="sm:hidden bg-[#1f2a36] px-4 pb-4 text-sm font-medium space-y-3">
           <div className="border-b border-gray-700 pb-2">
-            <span className="text-gray-300 block">Hello, {user?.full_name.split(" ")[0] || "Guest"}</span>
+            <span className="text-gray-300 block">Hello, {user?.full_name?.split(" ")[0] || "Guest"}</span>
             <Link to="/profile" className="text-white block hover:underline">
               Account & Lists
             </Link>
           </div>
+          {user?.role === "admin" && (
+            <Link
+              to="/admin"
+              className="flex items-center gap-2 text-white hover:underline"
+              onClick={() => setMobileMenuOpen(false)}
+            >
+              <LayoutDashboard className="h-5 w-5" />
+              <span>Admin dashboard</span>
+            </Link>
+          )}
     <div className="flex items-center gap-1 text-white">
       <Package className="w-5 h-5 text-white" />
       <Link to="/orders" className="hover:underline">

@@ -506,6 +506,534 @@ app.post(
   }
 );
 
+app.get("/admin/stats", auth, requireAdmin, async (req, res) => {
+  try {
+    const [
+      [[orderStats]],
+      [[productStats]],
+      [[userStats]],
+      [recentOrders],
+      [lowStockProducts],
+    ] = await Promise.all([
+      db.query(
+        `SELECT
+           COUNT(*) AS total_orders,
+           SUM(status NOT IN ('Delivered', 'Cancelled')) AS open_orders,
+           COALESCE(
+             SUM(
+               CASE
+                 WHEN payment_status = 'Paid'
+                   OR (payment_method = 'COD' AND status = 'Delivered')
+                 THEN total_amount
+                 ELSE 0
+               END
+             ),
+             0
+           ) AS revenue
+         FROM orders`
+      ),
+      db.query(
+        `SELECT
+           SUM(is_active = TRUE) AS active_products,
+           SUM(is_active = TRUE AND stock <= 5) AS low_stock_products
+         FROM products`
+      ),
+      db.query(
+        `SELECT
+           COUNT(*) AS total_users,
+           SUM(role = 'customer') AS customers
+         FROM users`
+      ),
+      db.query(
+        `SELECT
+           o.id,
+           o.total_amount,
+           o.payment_method,
+           o.payment_status,
+           o.status,
+           o.created_at,
+           u.full_name,
+           u.email,
+           COALESCE(items.item_count, 0) AS item_count
+         FROM orders o
+         JOIN users u ON u.id = o.user_id
+         LEFT JOIN (
+           SELECT order_id, SUM(quantity) AS item_count
+           FROM order_items
+           GROUP BY order_id
+         ) items ON items.order_id = o.id
+         ORDER BY o.created_at DESC
+         LIMIT 6`
+      ),
+      db.query(
+        `SELECT
+           p.id,
+           p.name,
+           p.stock,
+           p.category,
+           COALESCE(pi.image_url, p.image_url, '') AS image_url
+         FROM products p
+         LEFT JOIN (
+           SELECT product_id, MIN(image_url) AS image_url
+           FROM product_images
+           GROUP BY product_id
+         ) pi ON pi.product_id = p.id
+         WHERE p.is_active = TRUE AND p.stock <= 5
+         ORDER BY p.stock ASC, p.name ASC
+         LIMIT 6`
+      ),
+    ]);
+
+    res.json({
+      stats: {
+        revenue: Number(orderStats.revenue || 0),
+        total_orders: Number(orderStats.total_orders || 0),
+        open_orders: Number(orderStats.open_orders || 0),
+        active_products: Number(productStats.active_products || 0),
+        low_stock_products: Number(productStats.low_stock_products || 0),
+        total_users: Number(userStats.total_users || 0),
+        customers: Number(userStats.customers || 0),
+      },
+      recent_orders: recentOrders,
+      low_stock_products: lowStockProducts,
+    });
+  } catch (error) {
+    console.error("Admin stats error:", error);
+    res.status(500).json({ message: "Could not load dashboard statistics." });
+  }
+});
+
+app.get("/admin/products", auth, requireAdmin, async (req, res) => {
+  const search = String(req.query.search || "").trim();
+  const status = String(req.query.status || "all");
+  const clauses = ["(p.name LIKE ? OR COALESCE(p.category, '') LIKE ?)"];
+  const values = [`%${search}%`, `%${search}%`];
+
+  if (status === "active") {
+    clauses.push("p.is_active = TRUE");
+  } else if (status === "archived") {
+    clauses.push("p.is_active = FALSE");
+  } else if (status === "low_stock") {
+    clauses.push("p.is_active = TRUE AND p.stock <= 5");
+  }
+
+  try {
+    const [products] = await db.query(
+      `SELECT
+         p.id,
+         p.name,
+         p.description,
+         p.price,
+         p.original_price,
+         p.category,
+         p.stock,
+         p.rating,
+         p.reviews,
+         p.is_prime,
+         p.is_active,
+         p.created_at,
+         p.updated_at,
+         COALESCE(pi.image_url, p.image_url, '') AS image_url
+       FROM products p
+       LEFT JOIN (
+         SELECT product_id, MIN(image_url) AS image_url
+         FROM product_images
+         GROUP BY product_id
+       ) pi ON pi.product_id = p.id
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY p.is_active DESC, p.updated_at DESC`,
+      values
+    );
+
+    res.json({ products });
+  } catch (error) {
+    console.error("Admin products error:", error);
+    res.status(500).json({ message: "Could not load products." });
+  }
+});
+
+app.put("/admin/products/:id", auth, requireAdmin, async (req, res) => {
+  const productId = Number(req.params.id);
+  const {
+    name,
+    description,
+    price,
+    original_price,
+    category,
+    stock,
+  } = req.body;
+  const parsedPrice = Number(price);
+  const parsedOriginalPrice =
+    original_price === null || original_price === ""
+      ? null
+      : Number(original_price);
+  const parsedStock = Number(stock);
+
+  if (
+    !Number.isInteger(productId) ||
+    productId <= 0 ||
+    !name?.trim() ||
+    !description?.trim() ||
+    !Number.isFinite(parsedPrice) ||
+    parsedPrice < 0 ||
+    (parsedOriginalPrice !== null &&
+      (!Number.isFinite(parsedOriginalPrice) || parsedOriginalPrice < 0)) ||
+    !Number.isInteger(parsedStock) ||
+    parsedStock < 0
+  ) {
+    return res.status(400).json({ message: "Provide valid product details." });
+  }
+
+  try {
+    const [[existingProduct]] = await db.query(
+      "SELECT id FROM products WHERE id = ? LIMIT 1",
+      [productId]
+    );
+
+    if (!existingProduct) {
+      return res.status(404).json({ message: "Product not found." });
+    }
+
+    await db.query(
+      `UPDATE products
+       SET name = ?,
+           description = ?,
+           price = ?,
+           original_price = ?,
+           category = ?,
+           stock = ?
+       WHERE id = ?`,
+      [
+        name.trim(),
+        description.trim(),
+        parsedPrice,
+        parsedOriginalPrice,
+        category?.trim() || null,
+        parsedStock,
+        productId,
+      ]
+    );
+
+    res.json({ message: "Product updated successfully." });
+  } catch (error) {
+    console.error("Admin product update error:", error);
+    res.status(500).json({ message: "Could not update product." });
+  }
+});
+
+app.delete("/admin/products/:id", auth, requireAdmin, async (req, res) => {
+  const productId = Number(req.params.id);
+
+  if (!Number.isInteger(productId) || productId <= 0) {
+    return res.status(400).json({ message: "Invalid product ID." });
+  }
+
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+    const [result] = await connection.query(
+      "UPDATE products SET is_active = FALSE WHERE id = ? AND is_active = TRUE",
+      [productId]
+    );
+
+    if (result.affectedRows === 0) {
+      const error = new Error("Product not found or already archived.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    await connection.query("DELETE FROM cart_items WHERE product_id = ?", [
+      productId,
+    ]);
+    await connection.commit();
+    res.json({ message: "Product archived successfully." });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Admin product archive error:", error);
+    res
+      .status(error.statusCode || 500)
+      .json({ message: error.message || "Could not archive product." });
+  } finally {
+    connection.release();
+  }
+});
+
+app.patch(
+  "/admin/products/:id/restore",
+  auth,
+  requireAdmin,
+  async (req, res) => {
+    const productId = Number(req.params.id);
+
+    if (!Number.isInteger(productId) || productId <= 0) {
+      return res.status(400).json({ message: "Invalid product ID." });
+    }
+
+    try {
+      const [result] = await db.query(
+        "UPDATE products SET is_active = TRUE WHERE id = ? AND is_active = FALSE",
+        [productId]
+      );
+
+      if (result.affectedRows === 0) {
+        return res
+          .status(404)
+          .json({ message: "Product not found or already active." });
+      }
+
+      res.json({ message: "Product restored successfully." });
+    } catch (error) {
+      console.error("Admin product restore error:", error);
+      res.status(500).json({ message: "Could not restore product." });
+    }
+  }
+);
+
+app.get("/admin/orders", auth, requireAdmin, async (req, res) => {
+  const search = String(req.query.search || "").trim();
+  const status = String(req.query.status || "all");
+  const clauses = [
+    "(u.full_name LIKE ? OR u.email LIKE ? OR CAST(o.id AS CHAR) LIKE ?)",
+  ];
+  const values = [`%${search}%`, `%${search}%`, `%${search}%`];
+
+  if (
+    ["Placed", "Packed", "Shipped", "Delivered", "Cancelled"].includes(status)
+  ) {
+    clauses.push("o.status = ?");
+    values.push(status);
+  }
+
+  try {
+    const [orders] = await db.query(
+      `SELECT
+         o.id,
+         o.total_amount,
+         o.payment_method,
+         o.payment_status,
+         o.status,
+         o.created_at,
+         u.id AS user_id,
+         u.full_name,
+         u.email,
+         a.city,
+         a.state,
+         COALESCE(items.item_count, 0) AS item_count
+       FROM orders o
+       JOIN users u ON u.id = o.user_id
+       JOIN addresses a ON a.id = o.address_id
+       LEFT JOIN (
+         SELECT order_id, SUM(quantity) AS item_count
+         FROM order_items
+         GROUP BY order_id
+       ) items ON items.order_id = o.id
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY o.created_at DESC`,
+      values
+    );
+
+    res.json({ orders });
+  } catch (error) {
+    console.error("Admin orders error:", error);
+    res.status(500).json({ message: "Could not load orders." });
+  }
+});
+
+app.patch("/admin/orders/:id/status", auth, requireAdmin, async (req, res) => {
+  const orderId = Number(req.params.id);
+  const nextStatus = req.body.status;
+  const allowedStatuses = [
+    "Placed",
+    "Packed",
+    "Shipped",
+    "Delivered",
+    "Cancelled",
+  ];
+
+  if (!Number.isInteger(orderId) || !allowedStatuses.includes(nextStatus)) {
+    return res.status(400).json({ message: "Invalid order status." });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [[order]] = await connection.query(
+      `SELECT id, payment_method, payment_status, status
+       FROM orders
+       WHERE id = ?
+       FOR UPDATE`,
+      [orderId]
+    );
+
+    if (!order) {
+      const error = new Error("Order not found.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (order.status === "Cancelled" && nextStatus !== "Cancelled") {
+      const error = new Error("A cancelled order cannot be reopened.");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (
+      nextStatus === "Cancelled" &&
+      order.status !== "Cancelled" &&
+      order.payment_method === "Razorpay" &&
+      order.payment_status === "Paid"
+    ) {
+      const error = new Error(
+        "Paid Razorpay orders require a refund before cancellation."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (nextStatus === "Cancelled" && order.status !== "Cancelled") {
+      await restoreOrderStock(connection, orderId);
+      await connection.query(
+        `UPDATE orders
+         SET status = 'Cancelled',
+             payment_status = CASE
+               WHEN payment_method = 'Razorpay' THEN 'Failed'
+               ELSE payment_status
+             END
+         WHERE id = ?`,
+        [orderId]
+      );
+      await connection.query(
+        `UPDATE payments
+         SET status = 'Failed',
+             failure_reason = 'Order cancelled by administrator'
+         WHERE order_id = ? AND status = 'Created'`,
+        [orderId]
+      );
+    } else if (nextStatus === "Delivered" && order.payment_method === "COD") {
+      await connection.query(
+        "UPDATE orders SET status = ?, payment_status = 'Paid' WHERE id = ?",
+        [nextStatus, orderId]
+      );
+    } else {
+      await connection.query("UPDATE orders SET status = ? WHERE id = ?", [
+        nextStatus,
+        orderId,
+      ]);
+    }
+
+    await connection.commit();
+    res.json({ message: "Order status updated successfully." });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Admin order status error:", error);
+    res
+      .status(error.statusCode || 500)
+      .json({ message: error.message || "Could not update order status." });
+  } finally {
+    connection.release();
+  }
+});
+
+app.get("/admin/users", auth, requireAdmin, async (req, res) => {
+  const search = String(req.query.search || "").trim();
+
+  try {
+    const [users] = await db.query(
+      `SELECT
+         u.id,
+         u.full_name,
+         u.email,
+         u.mobile,
+         u.role,
+         u.created_at,
+         COUNT(o.id) AS order_count,
+         COALESCE(
+           SUM(CASE WHEN o.status <> 'Cancelled' THEN o.total_amount ELSE 0 END),
+           0
+         ) AS total_spend
+       FROM users u
+       LEFT JOIN orders o ON o.user_id = u.id
+       WHERE u.full_name LIKE ? OR u.email LIKE ? OR u.mobile LIKE ?
+       GROUP BY
+         u.id,
+         u.full_name,
+         u.email,
+         u.mobile,
+         u.role,
+         u.created_at
+       ORDER BY u.created_at DESC`,
+      [`%${search}%`, `%${search}%`, `%${search}%`]
+    );
+
+    res.json({ users });
+  } catch (error) {
+    console.error("Admin users error:", error);
+    res.status(500).json({ message: "Could not load users." });
+  }
+});
+
+app.patch("/admin/users/:id/role", auth, requireAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  const nextRole = req.body.role;
+
+  if (
+    !Number.isInteger(userId) ||
+    userId <= 0 ||
+    !["customer", "admin"].includes(nextRole)
+  ) {
+    return res.status(400).json({ message: "Invalid user role." });
+  }
+
+  if (userId === req.user.id && nextRole !== "admin") {
+    return res.status(409).json({
+      message: "You cannot remove your own administrator access.",
+    });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [[targetUser]] = await connection.query(
+      "SELECT id, role FROM users WHERE id = ? FOR UPDATE",
+      [userId]
+    );
+
+    if (!targetUser) {
+      const error = new Error("User not found.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (targetUser.role === "admin" && nextRole === "customer") {
+      const [[adminCount]] = await connection.query(
+        "SELECT COUNT(*) AS total FROM users WHERE role = 'admin'"
+      );
+
+      if (Number(adminCount.total) <= 1) {
+        const error = new Error("Shopzi must keep at least one administrator.");
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+
+    await connection.query("UPDATE users SET role = ? WHERE id = ?", [
+      nextRole,
+      userId,
+    ]);
+    await connection.commit();
+    res.json({ message: "User role updated successfully." });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Admin user role error:", error);
+    res
+      .status(error.statusCode || 500)
+      .json({ message: error.message || "Could not update user role." });
+  } finally {
+    connection.release();
+  }
+});
+
 
 
 
@@ -519,7 +1047,8 @@ app.get("/products", async (req, res) => {
          p.*, 
          (SELECT image_url FROM product_images WHERE product_id = p.id LIMIT 1) AS image_url
        FROM products p
-       WHERE p.name LIKE ? OR p.category LIKE ?
+       WHERE p.is_active = TRUE
+         AND (p.name LIKE ? OR p.category LIKE ?)
        ORDER BY p.created_at DESC`,
       [`%${search}%`, `%${search}%`]
     );
@@ -539,7 +1068,7 @@ app.get("/product/:id", async (req, res) => {
 
   try {
     const [[product]] = await db.query(
-      `SELECT * FROM products WHERE id = ?`,
+      `SELECT * FROM products WHERE id = ? AND is_active = TRUE`,
       [productId]
     );
 
@@ -566,6 +1095,29 @@ app.post('/add-to-cart', auth, async (req, res) => {
   const { product_id, quantity = 1 } = req.body;
 
   try {
+    const [[product]] = await db.query(
+      "SELECT id, stock FROM products WHERE id = ? AND is_active = TRUE",
+      [product_id]
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        error: "This product is no longer available.",
+      });
+    }
+
+    if (
+      !Number.isInteger(Number(quantity)) ||
+      Number(quantity) <= 0 ||
+      Number(quantity) > Number(product.stock)
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "Requested quantity is not available.",
+      });
+    }
+
     // check if product already in cart
     const [existing] = await db.query(
       'SELECT * FROM cart_items WHERE user_id = ? AND product_id = ?',
@@ -573,10 +1125,20 @@ app.post('/add-to-cart', auth, async (req, res) => {
     );
 
     if (existing.length > 0) {
+      const nextQuantity =
+        Number(existing[0].quantity) + Number(quantity);
+
+      if (nextQuantity > Number(product.stock)) {
+        return res.status(409).json({
+          success: false,
+          error: "Requested quantity is not available.",
+        });
+      }
+
       // update quantity
       await db.query(
-        'UPDATE cart_items SET quantity = quantity + ? WHERE user_id = ? AND product_id = ?',
-        [quantity, userId, product_id]
+        'UPDATE cart_items SET quantity = ? WHERE user_id = ? AND product_id = ?',
+        [nextQuantity, userId, product_id]
       );
     } else {
       // insert new item
