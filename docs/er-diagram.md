@@ -11,6 +11,7 @@ erDiagram
     PRODUCTS ||--o{ ORDER_ITEMS : sold_as
     ADDRESSES ||--o{ ORDERS : used_for
     ORDERS ||--|{ ORDER_ITEMS : contains
+    ORDERS ||--o| PAYMENTS : paid_through
 
     USERS {
         INT id PK
@@ -69,6 +70,7 @@ erDiagram
         INT address_id FK
         DECIMAL total_amount
         VARCHAR payment_method
+        ENUM payment_status
         VARCHAR status
         TIMESTAMP created_at
         TIMESTAMP updated_at
@@ -80,6 +82,20 @@ erDiagram
         INT product_id FK
         INT quantity
         DECIMAL price
+    }
+
+    PAYMENTS {
+        INT id PK
+        INT order_id FK,UK
+        VARCHAR razorpay_order_id UK
+        VARCHAR razorpay_payment_id UK
+        DECIMAL amount
+        CHAR currency
+        ENUM status
+        VARCHAR payment_method
+        VARCHAR failure_reason
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
     }
 
     PASSWORD_RESET_TOKENS {
@@ -96,4 +112,5 @@ erDiagram
 - One product can have many image records, cart entries, and order item records.
 - One order belongs to one user and one delivery address.
 - One order contains one or more order item rows.
+- One online order has at most one Shopzi payment record.
 - `order_items.price` stores the product price at purchase time so old orders keep their original price even if the product price later changes.

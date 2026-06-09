@@ -4,6 +4,11 @@ import Header from "../components/header";
 import toast, { Toaster } from "react-hot-toast";
 import { Link } from "react-router-dom";
 
+const formatCurrency = new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
+});
+
 export default function OrdersPage() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -86,11 +91,19 @@ export default function OrdersPage() {
                     <p className="text-sm text-gray-600">
                       {order.created_at?.slice(0, 10)} | {order.status}
                     </p>
+                    <p className="text-sm text-gray-600">
+                      {order.payment_method} | Payment: {order.payment_status}
+                    </p>
                     <p className="text-sm text-gray-700">
-                      {order.address_name}, {order.street}, {order.city}, {order.state}
+                      {order.address_name}, {order.street}, {order.city},{" "}
+                      {order.state} - {order.pincode}
                     </p>
                   </div>
-                  {order.status === "Placed" && (
+                  {order.status === "Placed" &&
+                    !(
+                      order.payment_method === "Razorpay" &&
+                      order.payment_status === "Paid"
+                    ) && (
                     <button
                       onClick={() => cancelOrder(order.id)}
                       className="text-red-600 hover:underline text-sm"
@@ -118,7 +131,7 @@ export default function OrdersPage() {
         <p className="text-sm text-gray-600">Quantity: {item.quantity}</p>
       </div>
       <div className="text-right text-sm">
-        ₹{(item.quantity * item.price).toFixed(2)}
+        {formatCurrency.format(item.quantity * item.price)}
       </div>
     </div>
   </div>
@@ -130,7 +143,7 @@ export default function OrdersPage() {
                 <div className="pt-2 mt-2 border-t flex justify-between text-sm font-semibold">
                   <span>Total</span>
                   <span>
-                    ₹{Number(order.total_amount || 0).toFixed(2)}
+                    {formatCurrency.format(Number(order.total_amount || 0))}
                   </span>
                 </div>
               </div>

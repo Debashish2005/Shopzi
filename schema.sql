@@ -7,6 +7,7 @@ USE shopzi;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS password_reset_tokens;
+DROP TABLE IF EXISTS payments;
 DROP TABLE IF EXISTS order_items;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS cart_items;
@@ -112,6 +113,7 @@ CREATE TABLE orders (
   address_id INT NOT NULL,
   total_amount DECIMAL(10, 2) NOT NULL,
   payment_method VARCHAR(50) NOT NULL,
+  payment_status ENUM('Pending', 'Paid', 'Failed', 'Refunded') NOT NULL DEFAULT 'Pending',
   status VARCHAR(50) NOT NULL DEFAULT 'Placed',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -120,6 +122,7 @@ CREATE TABLE orders (
   KEY idx_orders_user_created (user_id, created_at),
   KEY idx_orders_address (address_id),
   KEY idx_orders_status (status),
+  KEY idx_orders_payment_status (payment_status),
   CONSTRAINT fk_orders_user
     FOREIGN KEY (user_id) REFERENCES users(id)
     ON DELETE CASCADE ON UPDATE CASCADE,
@@ -127,7 +130,7 @@ CREATE TABLE orders (
     FOREIGN KEY (address_id) REFERENCES addresses(id)
     ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT chk_orders_total_amount CHECK (total_amount >= 0),
-  CONSTRAINT chk_orders_payment_method CHECK (payment_method IN ('COD', 'Card', 'UPI', 'Net Banking')),
+  CONSTRAINT chk_orders_payment_method CHECK (payment_method IN ('COD', 'Razorpay')),
   CONSTRAINT chk_orders_status CHECK (status IN ('Placed', 'Packed', 'Shipped', 'Delivered', 'Cancelled'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -150,6 +153,30 @@ CREATE TABLE order_items (
     ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT chk_order_items_quantity CHECK (quantity > 0),
   CONSTRAINT chk_order_items_price CHECK (price >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE payments (
+  id INT AUTO_INCREMENT,
+  order_id INT NOT NULL,
+  razorpay_order_id VARCHAR(100) NOT NULL,
+  razorpay_payment_id VARCHAR(100),
+  amount DECIMAL(10, 2) NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'INR',
+  status ENUM('Created', 'Paid', 'Failed', 'Refunded') NOT NULL DEFAULT 'Created',
+  payment_method VARCHAR(50),
+  failure_reason VARCHAR(255),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_payments_order (order_id),
+  UNIQUE KEY uq_payments_razorpay_order (razorpay_order_id),
+  UNIQUE KEY uq_payments_razorpay_payment (razorpay_payment_id),
+  KEY idx_payments_status (status),
+  CONSTRAINT fk_payments_order
+    FOREIGN KEY (order_id) REFERENCES orders(id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT chk_payments_amount CHECK (amount >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE password_reset_tokens (
@@ -199,14 +226,21 @@ INSERT INTO cart_items (id, user_id, product_id, quantity) VALUES
 (2, 1, 2, 1),
 (3, 2, 4, 2);
 
-INSERT INTO orders (id, user_id, address_id, total_amount, payment_method, status) VALUES
-(1, 1, 1, 3298.00, 'COD', 'Placed'),
-(2, 2, 3, 1798.00, 'Card', 'Delivered');
+INSERT INTO orders
+  (id, user_id, address_id, total_amount, payment_method, payment_status, status)
+VALUES
+(1, 1, 1, 3298.00, 'COD', 'Pending', 'Placed'),
+(2, 2, 3, 1798.00, 'Razorpay', 'Paid', 'Delivered');
 
 INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES
 (1, 1, 1, 1, 799.00),
 (2, 1, 2, 1, 2499.00),
 (3, 2, 4, 2, 899.00);
+
+INSERT INTO payments
+  (id, order_id, razorpay_order_id, razorpay_payment_id, amount, currency, status, payment_method)
+VALUES
+(1, 2, 'order_sample_shopzi_2', 'pay_sample_shopzi_2', 1798.00, 'INR', 'Paid', 'card');
 
 INSERT INTO password_reset_tokens (id, user_id, token) VALUES
 (1, 1, 'sample-reset-token-riya');

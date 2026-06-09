@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Shopzi is an e-commerce DBMS project built with a React frontend, Node.js/Express backend, and MySQL database. The database stores users, addresses, products, product images, cart items, orders, order items, and password reset tokens. The backend performs authenticated CRUD operations and uses SQL joins and a transaction for order placement.
+Shopzi is an e-commerce DBMS project built with a React frontend, Node.js/Express backend, and MySQL database. The database stores users, addresses, products, product images, cart items, orders, order items, Razorpay payment records, and password reset tokens. The backend performs authenticated CRUD operations and uses SQL joins and transactions for order placement and payment processing.
 
 ## Database Design
 
@@ -15,6 +15,7 @@ The database name is `shopzi`, using `utf8mb4` character encoding for broad Unic
 - `cart_items`: products selected by a user before checkout.
 - `orders`: order header information such as user, address, total, payment method, and status.
 - `order_items`: products inside each order, including quantity and price snapshot.
+- `payments`: Razorpay order/payment identifiers, amount, method, status, and failure details.
 - `password_reset_tokens`: reset tokens linked to users.
 
 ## Normalization
@@ -38,6 +39,7 @@ Some denormalized snapshot data is intentionally stored in `order_items.price`. 
 - `orders` to `order_items`: one-to-many.
 - `products` to `order_items`: one-to-many.
 - `addresses` to `orders`: one-to-many.
+- `orders` to `payments`: one-to-zero-or-one.
 
 ## Constraints And Indexes
 
@@ -46,6 +48,7 @@ Primary keys uniquely identify each table row. Foreign keys enforce referential 
 - Unique email and mobile number in `users`.
 - Unique product per user in `cart_items`, preventing duplicate cart rows for the same user and product.
 - Unique reset token in `password_reset_tokens`.
+- Unique Razorpay order ID, payment ID, and Shopzi order reference in `payments`.
 - Check constraints for positive prices, stock, quantities, ratings, and valid order statuses.
 - Cascading deletes for dependent records such as addresses, cart items, product images, order items, and password reset tokens.
 
@@ -55,9 +58,9 @@ Indexes are added on common lookup columns such as user IDs, product IDs, catego
 
 The backend implements CRUD operations across the major entities:
 
-- Create: signup, add address, add product, add cart item, place order, create password reset token.
+- Create: signup, add address, add product, add cart item, place order, create Razorpay payment order, create password reset token.
 - Read: login user lookup, profile fetch, address list, product search, product details, cart view, order history.
-- Update: profile update, address update, password change, cart quantity update.
+- Update: profile update, address update, password change, cart quantity update, payment verification, order/payment status update.
 - Delete: address delete, cart item removal, order cancellation, password reset token cleanup.
 
 All user-scoped operations use the authenticated user ID to prevent one user from accessing or modifying another user's data.
@@ -74,9 +77,11 @@ These queries demonstrate relational retrieval instead of storing all display da
 
 ## Transaction Use
 
-Order placement uses a database transaction. The backend starts a transaction, creates the order row, inserts order item rows, clears the user's cart, and commits only if all steps succeed. If any step fails, it rolls back the transaction so partial orders are not stored.
+Order placement uses database transactions. The backend validates the user's address, reads product prices from MySQL, creates the order and order items, and reserves stock atomically. COD checkout also clears purchased cart rows in the same transaction.
 
-This is important because checkout changes multiple related tables. A transaction keeps the database consistent.
+For online checkout, the backend creates a Razorpay Test Mode order and stores its identifier in `payments`. After checkout, it verifies the HMAC signature and fetches the payment from Razorpay to confirm that the amount, currency, order ID, and captured status match. A successful verification updates `payments` and `orders` atomically. Closing or failing the test checkout marks the payment as failed and restores reserved stock.
+
+This is important because checkout changes several related tables. Transactions prevent partial orders, duplicate stock reduction, and inconsistent payment states.
 
 ## Sample Data
 
@@ -84,4 +89,4 @@ The `schema.sql` file includes sample users, addresses, products, images, cart i
 
 ## Conclusion
 
-The Shopzi schema is suitable for a DBMS project because it includes multiple related entities, primary and foreign keys, unique constraints, indexes, normalized table design, CRUD operations, joins, and transaction handling. It models a realistic e-commerce workflow from account creation through checkout and order history.
+The Shopzi schema is suitable for a DBMS project because it includes multiple related entities, primary and foreign keys, unique constraints, indexes, normalized table design, CRUD operations, joins, transaction handling, and payment-state persistence. It models a realistic e-commerce workflow from account creation through secure test checkout and order history.

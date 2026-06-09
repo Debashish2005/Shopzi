@@ -10,8 +10,25 @@ const path  = require("path");
 const nodemailer = require("nodemailer");
 const { cloudinary, storage } = require("./utils/cloudinary");
 const multer = require("multer");
+const Razorpay = require("razorpay");
+const {
+  assertAddressOwnership,
+  calculateTotalPaise,
+  loadCheckoutProducts,
+  normalizeCheckoutItems,
+  reserveStock,
+  restoreOrderStock,
+  verifyRazorpaySignature,
+} = require("./utils/checkout");
 
 const upload = multer({ storage });
+const razorpay =
+  process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET
+    ? new Razorpay({
+        key_id: process.env.RAZORPAY_KEY_ID,
+        key_secret: process.env.RAZORPAY_KEY_SECRET,
+      })
+    : null;
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -573,37 +590,66 @@ app.delete('/cart/:cartItemId', auth, async (req, res) => {
   }
 });
 
+function requireRazorpay() {
+  if (!razorpay) {
+    const error = new Error("Online payment is not configured on the server.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  return razorpay;
+}
+
+function sendCheckoutError(res, error, fallbackMessage) {
+  console.error(fallbackMessage, error);
+  const statusCode = error.statusCode || 500;
+  res.status(statusCode).json({
+    success: false,
+    message: statusCode === 500 ? fallbackMessage : error.message,
+  });
+}
+
 app.post("/place-order", auth, async (req, res) => {
   const userId = req.user.id;
-  const { address_id, payment_method, items } = req.body;
+  const { address_id, payment_method, items, source = "buy_now" } = req.body;
 
   if (!address_id || !payment_method || !items?.length) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
-  const connection = await db.getConnection(); // if using MySQL2 Pool
+  if (payment_method !== "COD") {
+    return res.status(400).json({
+      message: "Use the Razorpay payment flow for online payments.",
+    });
+  }
 
+  const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
+    const normalizedItems = normalizeCheckoutItems(items);
 
-    const total = items.reduce(
-      (sum, item) => sum + Number(item.price) * item.quantity,
-      0
+    await assertAddressOwnership(connection, address_id, userId);
+    const checkoutItems = await loadCheckoutProducts(
+      connection,
+      normalizedItems,
+      true
     );
+    const totalPaise = calculateTotalPaise(checkoutItems);
+    const total = (totalPaise / 100).toFixed(2);
 
     const [orderResult] = await connection.query(
-      `INSERT INTO orders (user_id, address_id, total_amount, payment_method)
-       VALUES (?, ?, ?, ?)`,
-      [userId, address_id, total, payment_method]
+      `INSERT INTO orders
+         (user_id, address_id, total_amount, payment_method, payment_status, status)
+       VALUES (?, ?, ?, 'COD', 'Pending', 'Placed')`,
+      [userId, address_id, total]
     );
 
     const orderId = orderResult.insertId;
-
-    const itemValues = items.map(item => [
+    const itemValues = checkoutItems.map((item) => [
       orderId,
       item.product_id,
       item.quantity,
-      item.price
+      item.unit_price,
     ]);
 
     await connection.query(
@@ -611,17 +657,351 @@ app.post("/place-order", auth, async (req, res) => {
        VALUES ?`,
       [itemValues]
     );
+    await reserveStock(connection, checkoutItems);
 
-    // Optional: Clear cart
-    await connection.query(`DELETE FROM cart_items WHERE user_id = ?`, [userId]);
+    if (source === "cart") {
+      const productIds = checkoutItems.map((item) => item.product_id);
+      const placeholders = productIds.map(() => "?").join(", ");
+      await connection.query(
+        `DELETE FROM cart_items
+         WHERE user_id = ? AND product_id IN (${placeholders})`,
+        [userId, ...productIds]
+      );
+    }
 
     await connection.commit();
 
-    res.status(201).json({ success: true, message: "Order placed successfully" });
+    res.status(201).json({
+      success: true,
+      order_id: orderId,
+      message: "Cash on Delivery order placed successfully.",
+    });
   } catch (err) {
     await connection.rollback();
-    console.error("Order placement error:", err);
-    res.status(500).json({ success: false, message: "Failed to place order" });
+    sendCheckoutError(res, err, "Failed to place order.");
+  } finally {
+    connection.release();
+  }
+});
+
+app.post("/payments/create-order", auth, async (req, res) => {
+  const userId = req.user.id;
+  const { address_id, items, source = "buy_now" } = req.body;
+
+  if (!address_id || !items?.length) {
+    return res.status(400).json({ message: "Address and products are required." });
+  }
+
+  if (!["buy_now", "cart"].includes(source)) {
+    return res.status(400).json({ message: "Invalid checkout source." });
+  }
+
+  const connection = await db.getConnection();
+
+  try {
+    const razorpayClient = requireRazorpay();
+    await connection.beginTransaction();
+
+    const normalizedItems = normalizeCheckoutItems(items);
+    await assertAddressOwnership(connection, address_id, userId);
+    const checkoutItems = await loadCheckoutProducts(
+      connection,
+      normalizedItems,
+      true
+    );
+    const totalPaise = calculateTotalPaise(checkoutItems);
+    const total = (totalPaise / 100).toFixed(2);
+
+    const [orderResult] = await connection.query(
+      `INSERT INTO orders
+         (user_id, address_id, total_amount, payment_method, payment_status, status)
+       VALUES (?, ?, ?, 'Razorpay', 'Pending', 'Placed')`,
+      [userId, address_id, total]
+    );
+
+    const orderId = orderResult.insertId;
+    const itemValues = checkoutItems.map((item) => [
+      orderId,
+      item.product_id,
+      item.quantity,
+      item.unit_price,
+    ]);
+
+    await connection.query(
+      `INSERT INTO order_items (order_id, product_id, quantity, price)
+       VALUES ?`,
+      [itemValues]
+    );
+    await reserveStock(connection, checkoutItems);
+
+    const razorpayOrder = await razorpayClient.orders.create({
+      amount: totalPaise,
+      currency: "INR",
+      receipt: `shopzi_${orderId}_${Date.now()}`.slice(0, 40),
+      notes: {
+        shopzi_order_id: String(orderId),
+        user_id: String(userId),
+        checkout_source: source,
+      },
+    });
+
+    await connection.query(
+      `INSERT INTO payments
+         (order_id, razorpay_order_id, amount, currency, status)
+       VALUES (?, ?, ?, ?, 'Created')`,
+      [orderId, razorpayOrder.id, total, razorpayOrder.currency]
+    );
+
+    const [[user]] = await connection.query(
+      "SELECT full_name, email, mobile FROM users WHERE id = ? LIMIT 1",
+      [userId]
+    );
+
+    await connection.commit();
+
+    res.status(201).json({
+      success: true,
+      key_id: process.env.RAZORPAY_KEY_ID,
+      shopzi_order_id: orderId,
+      razorpay_order_id: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      prefill: {
+        name: user?.full_name || req.user.full_name || "",
+        email: user?.email || req.user.email || "",
+        contact: user?.mobile || "",
+      },
+    });
+  } catch (err) {
+    await connection.rollback();
+    sendCheckoutError(res, err, "Could not start online payment.");
+  } finally {
+    connection.release();
+  }
+});
+
+app.post("/payments/verify", auth, async (req, res) => {
+  const userId = req.user.id;
+  const {
+    shopzi_order_id,
+    razorpay_order_id,
+    razorpay_payment_id,
+    razorpay_signature,
+  } = req.body;
+
+  if (
+    !shopzi_order_id ||
+    !razorpay_order_id ||
+    !razorpay_payment_id ||
+    !razorpay_signature
+  ) {
+    return res.status(400).json({ message: "Payment verification data is missing." });
+  }
+
+  try {
+    const razorpayClient = requireRazorpay();
+    const [[paymentRecord]] = await db.query(
+      `SELECT
+         p.order_id,
+         p.razorpay_order_id,
+         p.razorpay_payment_id,
+         p.amount,
+         p.status,
+         o.user_id
+       FROM payments p
+       JOIN orders o ON o.id = p.order_id
+       WHERE p.order_id = ? AND o.user_id = ?
+       LIMIT 1`,
+      [shopzi_order_id, userId]
+    );
+
+    if (!paymentRecord) {
+      return res.status(404).json({ message: "Payment order was not found." });
+    }
+
+    if (paymentRecord.razorpay_order_id !== razorpay_order_id) {
+      return res.status(400).json({ message: "Payment order does not match." });
+    }
+
+    const signatureIsValid = verifyRazorpaySignature({
+      razorpayOrderId: paymentRecord.razorpay_order_id,
+      razorpayPaymentId: razorpay_payment_id,
+      razorpaySignature: razorpay_signature,
+      keySecret: process.env.RAZORPAY_KEY_SECRET,
+    });
+
+    if (!signatureIsValid) {
+      return res.status(400).json({ message: "Payment signature verification failed." });
+    }
+
+    const [razorpayPayment, razorpayOrder] = await Promise.all([
+      razorpayClient.payments.fetch(razorpay_payment_id),
+      razorpayClient.orders.fetch(paymentRecord.razorpay_order_id),
+    ]);
+    const expectedAmount = Math.round(Number(paymentRecord.amount) * 100);
+
+    if (
+      razorpayPayment.order_id !== paymentRecord.razorpay_order_id ||
+      Number(razorpayPayment.amount) !== expectedAmount ||
+      razorpayPayment.currency !== "INR" ||
+      razorpayPayment.status !== "captured"
+    ) {
+      return res.status(409).json({
+        message: "Payment is not captured yet. Please check again shortly.",
+      });
+    }
+
+    const connection = await db.getConnection();
+
+    try {
+      await connection.beginTransaction();
+
+      const [[lockedPayment]] = await connection.query(
+        `SELECT p.status, p.razorpay_payment_id
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         WHERE p.order_id = ? AND o.user_id = ?
+         FOR UPDATE`,
+        [shopzi_order_id, userId]
+      );
+
+      if (!lockedPayment) {
+        const error = new Error("Payment order was not found.");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (lockedPayment.status === "Paid") {
+        if (lockedPayment.razorpay_payment_id !== razorpay_payment_id) {
+          const error = new Error("This order has already been paid.");
+          error.statusCode = 409;
+          throw error;
+        }
+
+        await connection.commit();
+        return res.json({
+          success: true,
+          order_id: Number(shopzi_order_id),
+          message: "Payment was already verified.",
+        });
+      }
+
+      if (lockedPayment.status !== "Created") {
+        const error = new Error("This payment order is no longer active.");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      await connection.query(
+        `UPDATE payments
+         SET razorpay_payment_id = ?,
+             status = 'Paid',
+             payment_method = ?,
+             failure_reason = NULL
+         WHERE order_id = ?`,
+        [
+          razorpay_payment_id,
+          razorpayPayment.method || "Razorpay",
+          shopzi_order_id,
+        ]
+      );
+      await connection.query(
+        `UPDATE orders
+         SET payment_status = 'Paid', status = 'Placed'
+         WHERE id = ? AND user_id = ?`,
+        [shopzi_order_id, userId]
+      );
+
+      if (razorpayOrder.notes?.checkout_source === "cart") {
+        const [orderItems] = await connection.query(
+          "SELECT product_id FROM order_items WHERE order_id = ?",
+          [shopzi_order_id]
+        );
+        const productIds = orderItems.map((item) => item.product_id);
+
+        if (productIds.length > 0) {
+          const placeholders = productIds.map(() => "?").join(", ");
+          await connection.query(
+            `DELETE FROM cart_items
+             WHERE user_id = ? AND product_id IN (${placeholders})`,
+            [userId, ...productIds]
+          );
+        }
+      }
+
+      await connection.commit();
+
+      res.json({
+        success: true,
+        order_id: Number(shopzi_order_id),
+        message: "Payment verified and order placed successfully.",
+      });
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    sendCheckoutError(res, err, "Could not verify payment.");
+  }
+});
+
+app.post("/payments/cancel", auth, async (req, res) => {
+  const userId = req.user.id;
+  const { shopzi_order_id, reason = "Payment window closed by customer." } = req.body;
+
+  if (!shopzi_order_id) {
+    return res.status(400).json({ message: "Order ID is required." });
+  }
+
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [[paymentRecord]] = await connection.query(
+      `SELECT p.status
+       FROM payments p
+       JOIN orders o ON o.id = p.order_id
+       WHERE p.order_id = ? AND o.user_id = ?
+       FOR UPDATE`,
+      [shopzi_order_id, userId]
+    );
+
+    if (!paymentRecord) {
+      const error = new Error("Payment order was not found.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (paymentRecord.status === "Paid") {
+      const error = new Error("A successful payment cannot be cancelled here.");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (paymentRecord.status === "Created") {
+      await restoreOrderStock(connection, shopzi_order_id);
+      await connection.query(
+        `UPDATE payments
+         SET status = 'Failed', failure_reason = ?
+         WHERE order_id = ?`,
+        [String(reason).slice(0, 255), shopzi_order_id]
+      );
+      await connection.query(
+        `UPDATE orders
+         SET payment_status = 'Failed', status = 'Cancelled'
+         WHERE id = ? AND user_id = ?`,
+        [shopzi_order_id, userId]
+      );
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: "Pending payment was cancelled." });
+  } catch (err) {
+    await connection.rollback();
+    sendCheckoutError(res, err, "Could not cancel pending payment.");
   } finally {
     connection.release();
   }
@@ -641,13 +1021,24 @@ app.get("/orders", auth, async (req, res) => {
     const [orders] = await db.query(
       `
       SELECT 
-        o.id AS order_id, o.total_amount, o.status, o.created_at,
+        o.id AS order_id,
+        o.total_amount,
+        o.payment_method,
+        o.payment_status,
+        o.status,
+        o.created_at,
+        a.name AS address_name,
+        a.street,
+        a.city,
+        a.state,
+        a.pincode,
         oi.product_id, oi.quantity, oi.price,
         p.name AS product_name,
         COALESCE(pi.image_url, '') AS image_url
       FROM orders o
       JOIN order_items oi ON o.id = oi.order_id
       JOIN products p ON oi.product_id = p.id
+      JOIN addresses a ON o.address_id = a.id
       LEFT JOIN (
         SELECT product_id, MIN(image_url) AS image_url
         FROM product_images
@@ -665,8 +1056,15 @@ app.get("/orders", auth, async (req, res) => {
         grouped[row.order_id] = {
           id: row.order_id,
           total_amount: row.total_amount,
+          payment_method: row.payment_method,
+          payment_status: row.payment_status,
           status: row.status,
           created_at: row.created_at,
+          address_name: row.address_name,
+          street: row.street,
+          city: row.city,
+          state: row.state,
+          pincode: row.pincode,
           items: [],
         };
       }
@@ -692,24 +1090,48 @@ app.get("/orders", auth, async (req, res) => {
 app.delete("/orders/:orderId", auth, async (req, res) => {
   const userId = req.user.id;
   const orderId = req.params.orderId;
+  const connection = await db.getConnection();
 
   try {
-    // Optional: check if order belongs to user and status is cancellable
-    const [orderCheck] = await db.query(
-      `SELECT id FROM orders WHERE id = ? AND user_id = ? AND status = 'Placed'`,
+    await connection.beginTransaction();
+
+    const [[order]] = await connection.query(
+      `SELECT id, payment_method, payment_status, status
+       FROM orders
+       WHERE id = ? AND user_id = ?
+       FOR UPDATE`,
       [orderId, userId]
     );
 
-    if (orderCheck.length === 0) {
-      return res.status(404).json({ message: "Order not found or not cancellable" });
+    if (!order || order.status !== "Placed") {
+      const error = new Error("Order not found or not cancellable.");
+      error.statusCode = 404;
+      throw error;
     }
 
-    await db.query(`DELETE FROM orders WHERE id = ?`, [orderId]);
+    if (order.payment_method === "Razorpay" && order.payment_status === "Paid") {
+      const error = new Error(
+        "Online-payment cancellation requires a refund and is not available yet."
+      );
+      error.statusCode = 409;
+      throw error;
+    }
+
+    await restoreOrderStock(connection, orderId);
+    await connection.query(
+      `UPDATE orders
+       SET status = 'Cancelled'
+       WHERE id = ? AND user_id = ?`,
+      [orderId, userId]
+    );
+    await connection.commit();
 
     res.json({ message: "Order cancelled successfully" });
   } catch (err) {
-    console.error("Failed to cancel order:", err);
-    res.status(500).json({ message: "Server error" });
+    await connection.rollback();
+    sendCheckoutError(res, err, "Failed to cancel order.");
+  } finally {
+    connection.release();
   }
 });
 
