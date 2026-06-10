@@ -216,7 +216,12 @@ export default function OrdersPage() {
 
     try {
       const response = await api.get("/orders");
-      setOrders(response.data.orders || []);
+      const newestFirst = [...(response.data.orders || [])].sort((a, b) => {
+        const dateDifference =
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        return dateDifference || Number(b.id) - Number(a.id);
+      });
+      setOrders(newestFirst);
     } catch (error) {
       console.error("Failed to fetch orders", error);
       setLoadError("We could not load your orders right now.");

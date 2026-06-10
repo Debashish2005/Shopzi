@@ -840,7 +840,7 @@ app.get("/admin/orders", auth, requireAdmin, async (req, res) => {
          GROUP BY order_id
        ) items ON items.order_id = o.id
        WHERE ${clauses.join(" AND ")}
-       ORDER BY o.created_at DESC`,
+       ORDER BY o.created_at DESC, o.id DESC`,
       values
     );
 
@@ -2213,7 +2213,7 @@ app.get("/orders", auth, async (req, res) => {
         GROUP BY product_id
       ) pi ON pi.product_id = p.id
       WHERE o.user_id = ?
-      ORDER BY o.created_at DESC
+      ORDER BY o.created_at DESC, o.id DESC
     `,
       [userId]
     );
