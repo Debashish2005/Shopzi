@@ -8,9 +8,9 @@
 
 ## Video Demo
 
-[![Watch Shopzi Demo](https://img.shields.io/badge/Watch_Shopzi_Demo-YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://youtu.be/MBXX_hnYvaAU)
+[![Watch the Shopzi project demo](https://i.ytimg.com/vi/MBXX_hnYvaA/maxresdefault.jpg)](https://youtu.be/MBXX_hnYvaA)
 
-[Watch the complete Shopzi project walkthrough on YouTube](https://youtu.be/MBXX_hnYvaAU)
+[Watch the complete Shopzi project walkthrough on YouTube](https://youtu.be/MBXX_hnYvaA)
 
 ---
 
